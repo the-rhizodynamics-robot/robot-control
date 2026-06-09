@@ -19,8 +19,7 @@ The robot uses a 2-axis stepper motor system:
 ## Code Structure
 
 ### Arduino Code (`arduino/`)
-- `robot_device.ino`: Main robot control firmware
-- `robot_device_testing/robot_device_testing.ino`: Motor testing script
+- `robot_device/robot_device.ino`: Main robot control firmware (the working / prod sketch)
 - `photointerrupter_testing/photointerrupter_testing.ino`: Sensor testing utility
 
 ### Python Control (`python_runner/`)
@@ -30,10 +29,11 @@ The robot uses a 2-axis stepper motor system:
 
 ### Arduino Constants
 - `KILLCODE = 2048`: Emergency stop signal (must match Python)
-- Motor pins: X-axis (11,12,13), Y-axis (8,9,10)
-- Sensor pins: A0 (horizontal), A1 (vertical) 
-- Camera trigger: Pin 12 (D12)
-- Shelf relays: Pins 23,25,27,29,31,33
+- Motor pins: X-axis step/dir/enable (5/7/6), Y-axis step/dir/enable (8/10/9); enable active-LOW
+- Sensor pins: D3 (horizontal), D2 (vertical), INPUT_PULLUP, trigger reads LOW
+- Camera trigger: D12, ~50ms HIGH pulse (a shorter pulse is ignored by the camera)
+- Shelf relays: Pins 23,25,27,29,31,33 (active-LOW)
+- Run profile: 3 shelves x 8 photos, snake path, 15-min cycle, 15h day / 9h night
 
 ### Python Configuration
 - COM port and robot ID configuration

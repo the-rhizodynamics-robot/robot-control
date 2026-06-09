@@ -1,7 +1,8 @@
 // =============================================================
-//  robot_device_reconstructed.ino
+//  robot_device.ino
 //
-//  Reconstructed firmware for the plant-imaging camera gantry.
+//  Firmware for the plant-imaging camera gantry. (Reconstructed after the
+//  original was lost; this is now the canonical / working version.)
 //
 //  WHY THIS FILE EXISTS:
 //  The firmware actually running on the robot was lost (it was
@@ -64,7 +65,7 @@ const boolean down  = HIGH;
 
 // ---------------- Timing -------------------------------------
 const unsigned long STEP_DELAY_US    = 100;   // [KNOWN] step half-period (scaffold)
-const unsigned long CAMERA_PULSE_US  = 100;   // [CONFIRM] trigger pulse width
+const unsigned long CAMERA_PULSE_MS  = 50;    // [KNOWN] 50ms HIGH pulse — confirmed firing the camera in camera_trigger_test
 const unsigned long LIGHT_SETTLE_MS  = 3000;  // [TUNE] dwell after light-on before shot
 const unsigned long POST_SHOT_MS     = 500;   // [TUNE] dwell after shot (camera save)
 
@@ -183,7 +184,7 @@ void takePhoto(int shelf, bool dayTime) {
   }
 
   digitalWrite(cameraPin, HIGH);
-  delayMicroseconds(CAMERA_PULSE_US);
+  delay(CAMERA_PULSE_MS);
   digitalWrite(cameraPin, LOW);
   delay(POST_SHOT_MS);
 
