@@ -32,7 +32,7 @@ The robot uses a 2-axis stepper motor system:
 - `KILLCODE = 2048`: Emergency stop signal (must match Python)
 - Motor pins: X-axis (11,12,13), Y-axis (8,9,10)
 - Sensor pins: A0 (horizontal), A1 (vertical) 
-- Camera trigger: Pin 7
+- Camera trigger: Pin 12 (D12)
 - Shelf relays: Pins 23,25,27,29,31,33
 
 ### Python Configuration
