@@ -1,0 +1,40 @@
+# --- Claude Code ---
+.claude/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Robot host runtime artifacts ---
+robot_host.log
+*.log
+
+# --- Local config / secrets ---
+# config.toml holds non-secret defaults and IS tracked; ignore local overrides.
+config.local.toml
+.env
+
+# --- Arduino build output ---
+build/
+*.hex
+*.elf
+
+# --- OS / editor cruft ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
