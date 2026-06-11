@@ -1,39 +1,23 @@
 // =============================================================
 //  robot_device.ino
 //
-//  Firmware for the plant-imaging camera gantry. (Reconstructed after the
-//  original was lost; this is now the canonical / working version.)
-//
-//  WHY THIS FILE EXISTS:
-//  The firmware actually running on the robot was lost (it was
-//  never committed, and the dev machine died). This is a rebuild
-//  from the closest surviving ancestor -- robot_device_testing.ino
-//  -- with the camera / day-night / interval features layered back
-//  on, inferred from the live serial output:
+//  Firmware for the plant-imaging camera gantry. 
 //
 //    Camera gantry starting...
 //    Day/night cycle: 15 hours day, 9 hours night
 //    Cycle interval: 15 minutes
 //    Will photograph 3 shelves with 8 photos each
 //
-//  CONFIDENCE KEY in the comments below:
-//    [KNOWN]   recovered from the scaffold, serial output, or user
-//    [TUNE]    grounded in the scaffold but MUST be checked on the rig
-//    [CONFIRM] a genuine unknown -- verify against the wiring first
-//
-//  DO NOT trust an unattended run until the [TUNE]/[CONFIRM] items
-//  have been checked on the hardware.
 // =============================================================
 
 // ---------------- Run configuration --------------------------
-const int numShelves     = 3;     // [KNOWN] from serial: "3 shelves"
-const int photosPerShelf = 8;     // [KNOWN] from serial: "8 photos each"
-const int dayHours       = 15;    // [KNOWN] from serial: "15 hours day"
-const int nightHours     = 24 - dayHours;            // 9 hours night
-const unsigned long cycleIntervalMs = 15UL * 60UL * 1000UL; // [KNOWN] 15 min
+const int numShelves     = 3;     
+const int photosPerShelf = 8;     
+const int dayHours       = 15;    
+const int nightHours     = 24 - dayHours;            
+const unsigned long cycleIntervalMs = 15UL * 60UL * 1000UL; 
 
-// ---------------- Pin map (from robot_device_testing.ino) -----
-// [KNOWN] These match the scaffold the live firmware descends from.
+// Pin map
 const int horizSensor = 3;   // D3 photointerrupter
 const int vertSensor  = 2;   // D2 photointerrupter
 
@@ -45,16 +29,11 @@ const int stepPinY = 8;      // vertical motor
 const int dirPinY  = 10;
 const int enblPinY = 9;
 
-const int cameraPin = 12;    // [KNOWN] user-confirmed: camera trigger on GND + D12
+const int cameraPin = 12;    // camera pin
 
-// [CONFIRM] Shelf-lighting relay pins. These are the OLD robot_device.ino
-// values (Arduino Mega). If this board is an Uno, or the relays were
-// rewired, THESE ARE WRONG. Index 0 = shelf 1. Active-LOW assumed.
-// Set ENABLE_SHELF_LIGHTS = false to disable lighting entirely until
-// you have confirmed these pins.
 const bool ENABLE_SHELF_LIGHTS = true;
 const int  shelfRelayPins[]    = {23, 25, 27, 29, 31, 33};
-const int  RELAY_ON  = LOW;    // [CONFIRM] LOW = light on (active-low relay board)
+const int  RELAY_ON  = LOW;    
 const int  RELAY_OFF = HIGH;
 
 // ---------------- Direction constants (from scaffold) --------

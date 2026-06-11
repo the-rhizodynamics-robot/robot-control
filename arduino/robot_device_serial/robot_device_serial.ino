@@ -9,7 +9,7 @@
 //      firmware reads (and echoes back for verification) instead of
 //      using hardcoded constants;
 //    - "home" REPORT: the firmware prints "home" once per completed
-//      cycle so the host watchdog knows it is alive;
+//      cycle so the host watchdog knows it is alive; 
 //    - KILL: at any time the host may send KILLCODE (2048) to stop
 //      the robot immediately.
 //
