@@ -1,0 +1,13 @@
+# Persistent default robot configuration.
+# Edit these so the interactive prompts default to your usual setup;
+# press Enter at each prompt to accept the value here.
+
+robot_id = "4"
+com_port = "COM4"
+num_shelves = 3
+photos_per_shelf = 8
+cycle_interval_min = 15
+day_hours = 24            # 24 = constant light
+start_hour = 0
+image_dir = 'D:\images\robot4'
+kill_margin_min = 2       # grace added to the cycle interval before a kill
