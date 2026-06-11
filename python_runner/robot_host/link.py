@@ -64,7 +64,11 @@ class RobotLink:
             line = self.read_line()
             if not line:
                 continue
-            if HOME_TOKEN in line.lower():
+            # Match the heartbeat line EXACTLY. The firmware also prints
+            # status lines that contain the word "home" ("Returning to home
+            # position...", "Photography sequence complete! Returning home...");
+            # a substring test would treat each of those as a finished cycle.
+            if line.strip().lower() == HOME_TOKEN:
                 return True
             if on_status:
                 on_status(f"robot: {line}")
