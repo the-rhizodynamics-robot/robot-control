@@ -1,0 +1,65 @@
+cff-version: 1.2.0
+title: The Rhizodynamics Robot (GROOT)
+message: >-
+  If you use this software, please cite both the software and the paper that
+  describes the system (see preferred-citation below).
+type: software
+authors:
+  - given-names: Isaiah W.
+    family-names: Taylor
+    affiliation: Lead developer
+repository-code: "https://github.com/the-rhizodynamics-robot"
+abstract: >-
+  Automated, high-throughput time-lapse imaging platform (GROOT — Generating
+  Rhizodynamic Observations Over Time) for studying long-term dynamic root
+  growth. Includes Arduino firmware and a Python host program for the camera
+  gantry, plus a QR-code label generator for growth containers.
+keywords:
+  - root growth
+  - plant phenotyping
+  - time-lapse imaging
+  - robotics
+  - rhizodynamics
+license: MIT
+preferred-citation:
+  type: article
+  title: >-
+    The rhizodynamics robot: Automated imaging system for studying long-term
+    dynamic root growth
+  authors:
+    - given-names: Aradhya
+      family-names: Rajanala
+    - given-names: Isaiah W.
+      family-names: Taylor
+    - given-names: Erin
+      family-names: McCaskey
+    - given-names: Christopher
+      family-names: Pierce
+    - given-names: Jason
+      family-names: Ligon
+    - given-names: Enes
+      family-names: Aydin
+    - given-names: Carrie
+      family-names: Hunner
+    - given-names: Amanda
+      family-names: Carmichael
+    - given-names: Lauren
+      family-names: Eserman
+    - given-names: Emily E. D.
+      family-names: Coffee
+    - given-names: Anupam
+      family-names: Mijar
+    - given-names: Milan
+      family-names: Shah
+    - given-names: Philip N.
+      family-names: Benfey
+    - given-names: Daniel I.
+      family-names: Goldman
+  journal: PLOS ONE
+  year: 2023
+  month: 12
+  volume: 18
+  issue: 12
+  start: e0295823
+  doi: 10.1371/journal.pone.0295823
+  url: "https://doi.org/10.1371/journal.pone.0295823"
