@@ -1,5 +1,7 @@
 # --- Claude Code ---
 .claude/
+# Project info for humans and AIs lives in README.md; CLAUDE.md is local-only.
+CLAUDE.md
 
 # --- Python ---
 __pycache__/
