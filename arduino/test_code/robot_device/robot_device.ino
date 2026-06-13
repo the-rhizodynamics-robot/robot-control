@@ -1,7 +1,10 @@
 // =============================================================
 //  robot_device.ino
 //
-//  Firmware for the plant-imaging camera gantry. 
+//  STANDALONE firmware for the plant-imaging camera gantry: configuration is
+//  compiled in below, it never reads serial and never reports back. Use it to
+//  exercise the gantry/camera/lights without the host. The host-driven
+//  production sketch is arduino/robot_device_serial/robot_device_serial.ino.
 //
 //    Camera gantry starting...
 //    Day/night cycle: 15 hours day, 9 hours night
@@ -44,7 +47,10 @@ const boolean down  = HIGH;
 
 // ---------------- Timing -------------------------------------
 const unsigned long STEP_DELAY_US    = 100;   // [KNOWN] step half-period (scaffold)
-const unsigned long CAMERA_PULSE_MS  = 50;    // [KNOWN] 50ms HIGH pulse — confirmed firing the camera in camera_trigger_test
+// The camera's opto-isolated trigger input IGNORES very short pulses. Hold the
+// line HIGH for ~50ms; a microsecond blip produces motion and lights but NO
+// images. This has bitten us before -- do not lower this without testing.
+const unsigned long CAMERA_PULSE_MS  = 50;    // HIGH pulse width; confirmed firing the camera in camera_trigger_test
 const unsigned long LIGHT_SETTLE_MS  = 3000;  // [TUNE] dwell after light-on before shot
 const unsigned long POST_SHOT_MS     = 500;   // [TUNE] dwell after shot (camera save)
 
