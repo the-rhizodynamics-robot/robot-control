@@ -68,7 +68,10 @@ const boolean down  = HIGH;
 
 // ---------------- Timing (same as robot_device.ino) ----------
 const unsigned long STEP_DELAY_US    = 100;
-const unsigned long CAMERA_PULSE_MS  = 50;    // a shorter pulse is ignored by the camera
+// The camera's opto-isolated trigger input IGNORES very short pulses. Hold the
+// line HIGH for ~50ms; a microsecond blip produces motion and lights but NO
+// images. This has bitten us before -- do not lower this without testing.
+const unsigned long CAMERA_PULSE_MS  = 50;    // HIGH pulse width; confirmed firing the camera in camera_trigger_test
 const unsigned long LIGHT_SETTLE_MS  = 3000;
 const unsigned long POST_SHOT_MS     = 500;
 const unsigned long MOVE_PER_BOX_MS   = 1400; // [TUNE] land on each box

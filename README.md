@@ -42,19 +42,15 @@ and repeats on a fixed schedule. The system has two halves:
 
 **Directions:** right = `LOW`, left = `HIGH`, up = `LOW`, down = `HIGH`.
 
-> ⚠️ **Camera trigger gotcha:** the camera's opto-isolated input ignores very short
-> pulses. The trigger must be held HIGH for ~50 ms (`CAMERA_PULSE_MS`). A microsecond
-> blip produces motion and lights but **no images** — this has bitten us before.
-
 ---
 
 ## Repository layout
 
 ```
 arduino/
-  robot_device/robot_device.ino            # standalone firmware (hardcoded config) — known-good fallback
-  robot_device_serial/robot_device_serial.ino  # host-driven firmware (serial handshake + watchdog) — the one the host talks to
+  robot_device_serial/robot_device_serial.ino  # host-driven firmware (serial handshake + watchdog) — the production sketch
   test_code/
+    robot_device/...                       # standalone firmware (hardcoded config, no host) — run the gantry without Python
     photointerrupter_testing/...           # sensor bring-up sketch
     camera_trigger_test/...                # camera-trigger bring-up sketch
 python_runner/
@@ -69,14 +65,14 @@ python_runner/
   robot_runner.ipynb                       # legacy Jupyter controller (superseded by robot_host)
 ```
 
-### The two firmware sketches
+### Firmware sketches
 
-- **`robot_device.ino`** runs entirely on its own: configuration is compiled in, it
-  never reads serial and never reports back. Kept as the **known-good fallback** to
-  re-flash if anything misbehaves.
-- **`robot_device_serial.ino`** is the same proven motion/camera/light logic with the
-  serial protocol layered on. **This is the sketch the Python host drives.** Flash this
-  one for supervised operation.
+- **`robot_device_serial.ino`** is the **production firmware**: the proven
+  motion/camera/light logic with the serial protocol layered on. **This is the sketch
+  the Python host drives.** Flash this for supervised operation.
+- **`test_code/robot_device/robot_device.ino`** is a **standalone** version with the
+  configuration compiled in — it never reads serial and never reports back. Handy for
+  exercising the gantry/camera/lights without the host (or as a no-host fallback).
 
 ---
 
@@ -193,7 +189,8 @@ A periodic heartbeat ("Robot alive: N cycles…") is logged every few cycles.
 1. Compile/upload with the Arduino IDE (or bundled `arduino-cli`). Target: Arduino Mega 2560.
 2. Bring up components with the `arduino/test_code/` sketches before a full run.
 3. Keep firmware serial settings in sync with the host (9600 baud, `Serial.setTimeout(2)`).
-4. If `robot_device_serial.ino` misbehaves, re-flash `robot_device.ino` as the fallback.
+4. To run the gantry without the host (or as a fallback), flash the standalone
+   `test_code/robot_device/robot_device.ino`.
 
 ### Host
 1. `pip install -r python_runner/requirements.txt`.
