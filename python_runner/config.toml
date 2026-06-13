@@ -2,7 +2,6 @@
 # Edit these so the interactive prompts default to your usual setup;
 # press Enter at each prompt to accept the value here.
 
-robot_id = "4"
 com_port = "COM4"
 num_shelves = 3
 photos_per_shelf = 8

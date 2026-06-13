@@ -12,7 +12,6 @@ from pathlib import Path
 # Built-in fallback defaults. config.toml (if present) overrides these, and
 # the interactive prompts override that.
 DEFAULTS = {
-    "robot_id": "4",
     "com_port": "COM4",
     "num_shelves": 3,
     "photos_per_shelf": 8,
@@ -36,7 +35,6 @@ BOUNDS = {
 
 @dataclass
 class Config:
-    robot_id: str
     com_port: str
     num_shelves: int
     photos_per_shelf: int
@@ -114,7 +112,6 @@ def prompt_config(defaults: dict | None = None) -> Config:
         d.update(defaults)
 
     print("\nRobot run configuration (press Enter to accept the [default]):\n")
-    robot_id = _prompt_str("Robot ID", d["robot_id"])
     com_port = _prompt_str("COM port", d["com_port"])
     num_shelves = _prompt_int("Shelves to image", d["num_shelves"], *BOUNDS["num_shelves"])
     photos_per_shelf = _prompt_int("Photos per shelf", d["photos_per_shelf"], *BOUNDS["photos_per_shelf"])
@@ -125,7 +122,6 @@ def prompt_config(defaults: dict | None = None) -> Config:
     kill_margin_min = _prompt_int("Kill margin past interval (min)", d["kill_margin_min"], *BOUNDS["kill_margin_min"])
 
     return Config(
-        robot_id=robot_id,
         com_port=com_port,
         num_shelves=num_shelves,
         photos_per_shelf=photos_per_shelf,

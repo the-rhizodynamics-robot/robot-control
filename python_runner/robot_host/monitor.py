@@ -92,6 +92,6 @@ class Monitor:
 
             if self.heartbeat_every and cycle % self.heartbeat_every == 0:
                 self.notifier.heartbeat(
-                    f"Robot {self.cfg.robot_id} alive: {cycle} cycles, "
+                    f"Robot alive: {cycle} cycles, "
                     f"{now_count} images so far"
                 )
