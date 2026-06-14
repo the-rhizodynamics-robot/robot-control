@@ -78,6 +78,7 @@ const unsigned long MOVE_PER_BOX_MS   = 1400; // [TUNE] land on each box
 const unsigned long MOVE_PER_SHELF_MS = 8000; // [TUNE]
 const unsigned long START_OFFSET_X_MS = 0;    // [CONFIRM]
 const unsigned long START_OFFSET_Y_MS = 0;    // [CONFIRM]
+const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before stepping
 
 // ---------------- State --------------------------------------
 bool  calibrated      = false;
@@ -106,7 +107,11 @@ void setup() {
   pinMode(stepPinY, OUTPUT); pinMode(dirPinY, OUTPUT); pinMode(enblPinY, OUTPUT);
   digitalWrite(stepPinX, LOW);   digitalWrite(stepPinY, LOW);
   digitalWrite(dirPinX, right);  digitalWrite(dirPinY, up);
-  digitalWrite(enblPinX, LOW);   digitalWrite(enblPinY, LOW);  // LOW = enabled
+  // Start de-energized: motors are only powered while a cycle is actively
+  // running (engaged at the top of loop(), released after returnHome()), so
+  // they don't dump holding-current heat into the growth chamber while idle
+  // or while waiting on the handshake. HIGH = disabled.
+  digitalWrite(enblPinX, HIGH);  digitalWrite(enblPinY, HIGH);
 
   pinMode(horizSensor, INPUT_PULLUP);
   pinMode(vertSensor,  INPUT_PULLUP);
@@ -136,11 +141,21 @@ void setup() {
 void loop() {
   unsigned long cycleStart = millis();
 
+  // Motors are de-energized during the inter-cycle wait so their holding
+  // current does not heat the growth chamber. Re-engage and re-home at the
+  // START of every cycle: while unpowered the gantry may have drifted or the
+  // vertical carriage sagged, so we must re-establish position before any move
+  // that depends on it. calibrate() jogs clear of the flags first, so it
+  // re-seats correctly even if the carriage sagged below the sensor.
+  engageMotors();
   if (!calibrated) {
     Serial.println("Starting calibration sequence...");
     calibrate();
     calibrated = true;
     Serial.println("Calibration complete. Starting photography sequence...");
+  } else {
+    Serial.println("Re-homing at cycle start...");
+    calibrate();
   }
 
   bool dayTime = (dayElapsedHours < dayHours);
@@ -161,6 +176,11 @@ void loop() {
 
   Serial.println("Photography sequence complete! Returning home...");
   returnHome();
+
+  // De-energize the steppers for the idle wait: no holding current means no
+  // motor heat in the growth chamber between cycles. They are re-engaged and
+  // re-homed at the top of the next cycle.
+  disengageMotors();
 
   // ---- HOME REPORT: tell the host the cycle finished ----
   Serial.println("home");
@@ -252,6 +272,21 @@ void calibrate() {
 void returnHome() {
   Serial.println("Returning to home position using photointerrupters...");
   homeToSensors();
+}
+
+// Power the steppers on (active-LOW enable) and give the drivers a moment to
+// energize before any stepping, so the first moves don't lose steps.
+void engageMotors() {
+  digitalWrite(enblPinX, LOW);
+  digitalWrite(enblPinY, LOW);
+  delay(MOTOR_SETTLE_MS);
+}
+
+// Power the steppers off so they draw no holding current (and shed no heat)
+// while the gantry is idle between cycles.
+void disengageMotors() {
+  digitalWrite(enblPinX, HIGH);
+  digitalWrite(enblPinY, HIGH);
 }
 
 // Drive down + left until BOTH photointerrupters trigger (read LOW).
