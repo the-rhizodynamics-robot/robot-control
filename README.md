@@ -121,6 +121,20 @@ early in each interval, right after the photos for that cycle are taken.
 - **Close the Arduino IDE Serial Monitor** before running the host — only one program
   can hold the COM port at a time.
 
+> ⚠️ **The host machine must stay awake and not reboot during a run.** The host is a
+> watchdog that has to be alive every cycle; if it sleeps or restarts, it stops feeding
+> the watchdog and the run is lost (and on resume it may even false-kill the robot).
+> On the dedicated control PC, disable all of the following:
+> - **Sleep / display-off** — Power Options → set "Put the computer to sleep" to **Never**
+>   (also under the active power plan's advanced settings).
+> - **USB selective suspend** — Power Options → Advanced → USB settings → **Disabled**
+>   (keeps the Arduino's COM port from dropping).
+> - **Automatic update reboots** — Windows Update will install patches and reboot itself
+>   (this is what a monthly "Patch Tuesday" restart is). Either **Pause updates** for the
+>   duration of an experiment, or set the policy
+>   `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers = 1`
+>   so updates install but never auto-reboot — then reboot manually between runs.
+
 ### Run
 
 ```bash
