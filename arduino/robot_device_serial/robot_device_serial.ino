@@ -88,6 +88,13 @@ void setup() {
   Serial.begin(9600);
   Serial.setTimeout(2);  // needed for readString().toInt() of multi-digit numbers
 
+  // De-energize the steppers FIRST, before the (blocking) handshake below.
+  // The enable pins are active-LOW and float "enabled" at power-up, so until we
+  // drive them HIGH the drivers hold current — dumping heat into the chamber the
+  // whole time the robot sits waiting for the host. Disable them immediately.
+  pinMode(enblPinX, OUTPUT);     pinMode(enblPinY, OUTPUT);
+  digitalWrite(enblPinX, HIGH);  digitalWrite(enblPinY, HIGH);  // HIGH = disabled
+
   // ---- HANDSHAKE: receive run config from the host ----
   // Order must match the host (see protocol contract above).
   numShelves       = waitForValue();
@@ -107,10 +114,10 @@ void setup() {
   pinMode(stepPinY, OUTPUT); pinMode(dirPinY, OUTPUT); pinMode(enblPinY, OUTPUT);
   digitalWrite(stepPinX, LOW);   digitalWrite(stepPinY, LOW);
   digitalWrite(dirPinX, right);  digitalWrite(dirPinY, up);
-  // Start de-energized: motors are only powered while a cycle is actively
-  // running (engaged at the top of loop(), released after returnHome()), so
-  // they don't dump holding-current heat into the growth chamber while idle
-  // or while waiting on the handshake. HIGH = disabled.
+  // Steppers were already disabled at the top of setup(); keep them that way.
+  // They are only powered while a cycle is actively running (engaged at the top
+  // of loop(), released after returnHome()), so they never dump holding-current
+  // heat into the growth chamber while idle. HIGH = disabled.
   digitalWrite(enblPinX, HIGH);  digitalWrite(enblPinY, HIGH);
 
   pinMode(horizSensor, INPUT_PULLUP);
