@@ -7,6 +7,7 @@ brackets; pressing Enter accepts the default. Numeric values are bounds-checked
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 # Built-in fallback defaults. config.toml (if present) overrides these, and
@@ -85,6 +86,24 @@ def load_defaults(toml_path: str | Path = "config.toml") -> dict:
     return merged
 
 
+def make_run_dir(base: str | Path, num_shelves: int, boxes_per_shelf: int) -> Path:
+    """Create and return a fresh, timestamped run folder inside `base`.
+
+    The folder is named '<YYYYMMDDHHMMSS>_<num_shelves>_<boxes_per_shelf>'
+    (timestamp to the second; the timestamp itself contains no underscores).
+    The trailing '_<shelves>_<boxes>' is load-bearing: the downstream
+    file-sorting tool reads the imaging geometry from the run-folder name --
+    the number after the *final* underscore is boxes-per-shelf and the number
+    before it is the shelf count -- so both must stay at the end of the name,
+    in that order. (`boxes_per_shelf` is the robot's photos-per-shelf: one
+    photo per box position per shelf per cycle.)
+    """
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    run_dir = Path(base) / f"{timestamp}_{num_shelves}_{boxes_per_shelf}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def _prompt_int(name: str, default: int, lo: int, hi: int) -> int:
     while True:
         raw = input(f"{name} [{default}] (between {lo} and {hi}): ").strip()
@@ -118,7 +137,10 @@ def prompt_config(defaults: dict | None = None) -> Config:
     cycle_interval_min = _prompt_int("Cycle interval (min)", d["cycle_interval_min"], *BOUNDS["cycle_interval_min"])
     day_hours = _prompt_int("Daylight hours per 24h (24 = constant light)", d["day_hours"], *BOUNDS["day_hours"])
     start_hour = _prompt_int("Current hour into the day cycle", d["start_hour"], *BOUNDS["start_hour"])
-    image_dir = _prompt_str("Image save directory", d["image_dir"])
+    image_dir = _prompt_str(
+        "Output directory (a timestamped run folder is created inside)",
+        d["image_dir"],
+    )
     kill_margin_min = _prompt_int("Kill margin past interval (min)", d["kill_margin_min"], *BOUNDS["kill_margin_min"])
 
     return Config(

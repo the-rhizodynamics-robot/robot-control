@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from .config import load_defaults, prompt_config
+from .config import load_defaults, make_run_dir, prompt_config
 from .link import RobotLink
 from .monitor import Monitor, RobotStopped
 from .notifier import Notifier
@@ -33,14 +33,22 @@ def main() -> None:
     logger = setup_logging()
 
     cfg = prompt_config(load_defaults())
+
+    # Mint the per-run output folder inside the operator's chosen path and
+    # point the rest of the run at it. Done before the FlyCap prompt so the
+    # operator can copy this exact path into the capture software.
+    run_dir = make_run_dir(cfg.image_dir, cfg.num_shelves, cfg.photos_per_shelf)
+    cfg.image_dir = str(run_dir)
+
     logger.info(
         "Config: %d shelves x %d photos, %d-min cycle, day_hours=%d, port=%s",
         cfg.num_shelves, cfg.photos_per_shelf, cfg.cycle_interval_min,
         cfg.day_hours, cfg.com_port,
     )
+    logger.info("Run output folder: %s", run_dir)
 
-    input(f"\nConfirm FlyCap is running and saving to {cfg.image_dir}, "
-          "then press Enter to start... ")
+    input(f"\nPoint FlyCap to save into {cfg.image_dir} and confirm it is "
+          "running, then press Enter to start... ")
 
     link: RobotLink | None = None
     try:
