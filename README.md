@@ -158,11 +158,31 @@ Edit `python_runner/config.toml` to change the defaults the prompts start from:
 | `cycle_interval_min` | minutes between cycle starts |
 | `day_hours` | daylight hours per 24 h (`24` = constant light) |
 | `start_hour` | hour into the day cycle at startup |
-| `image_dir` | where FlyCap saves images (the watchdog counts files here) |
+| `image_dir` | **base** output directory; the host creates a per-run folder inside it (see below) |
 | `kill_margin_min` | grace added to the interval before a late-`home` kill |
 
 > TOML note: Windows paths use single-quoted **literal** strings so backslashes are
 > taken verbatim, e.g. `image_dir = 'D:\images\robot4'`.
+
+### Output folder naming
+
+`image_dir` is a **base** directory, not the final image folder. At run start the host
+creates a fresh per-run folder inside it named:
+
+```
+<YYYYMMDDHHMMSS>_<num_shelves>_<photos_per_shelf>     e.g. 20260613120000_3_2
+```
+
+(timestamp to the second; the timestamp itself has no underscores). The host prints this
+path and points the watchdog at it — **repoint FlyCap to save into this new folder each
+run** (it's printed at the "Confirm FlyCap…" prompt).
+
+> ⚠️ **The trailing `_<shelves>_<boxes>` is a contract with downstream processing.** The
+> [file-sorting](https://github.com/the-rhizodynamics-robot/file-sorting) pipeline reads the
+> imaging geometry straight from the folder name (`<timestamp>_<shelves>_<boxes>`, boxes =
+> `photos_per_shelf`). Keep both counts as the final two underscore-segments, as plain
+> integers, or sorting downstream breaks. Implemented in
+> `robot_host/config.py::make_run_dir()`.
 
 ---
 
