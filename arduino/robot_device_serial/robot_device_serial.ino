@@ -47,23 +47,24 @@ const int stepPinX = 5;      // horizontal motor
 const int dirPinX  = 7;
 const int enblPinX = 6;
 
-const int stepPinY = 8;      // vertical motor
-const int dirPinY  = 10;
-const int enblPinY = 9;
+const int stepPinY = 8;      // vertical (both Y drivers ganged; bench-tested wiring)
+const int dirPinY  = 9;
+const int enblPinY = 10;
 
-const int cameraPin = 12;    // camera trigger on GND + D12
+const int cameraPin = 12;    // -> 1k -> BFS GPIO Line 0 (OPTO_IN, black); GND -> blue (OPTO_GND)
 
-// Shelf-lighting relays (Mega, active-LOW). Index 0 = shelf 1.
-const bool ENABLE_SHELF_LIGHTS = true;
-const int  shelfRelayPins[]    = {23, 25, 27, 29, 31, 33};
-const int  MAX_SHELVES         = 6;   // size of shelfRelayPins
+// Single LED relay -- all lights on one channel (D11), active-LOW. Bench wiring
+// for THIS robot (not the per-shelf relay bank of the previous build).
+const bool ENABLE_LIGHTS = true;
+const int  ledRelayPin   = 11;
+const int  MAX_SHELVES   = 8;   // sanity clamp on host-sent numShelves
 const int  RELAY_ON  = LOW;
 const int  RELAY_OFF = HIGH;
 
 // ---------------- Direction constants ------------------------
-const boolean right = LOW;
-const boolean left  = HIGH;
-const boolean up    = LOW;
+const boolean right = HIGH;   // bench-tested on this robot
+const boolean left  = LOW;
+const boolean up    = LOW;    // bench-tested
 const boolean down  = HIGH;
 
 // ---------------- Timing (same as robot_device.ino) ----------
@@ -73,15 +74,30 @@ const unsigned long STEP_DELAY_US    = 100;
 // images. This has bitten us before -- do not lower this without testing.
 const unsigned long CAMERA_PULSE_MS  = 50;    // HIGH pulse width; confirmed firing the camera in camera_trigger_test
 const unsigned long LIGHT_SETTLE_MS  = 3000;
+const unsigned long LIGHT_WARMUP_MS  = 10000; // first cycle only: let the LEDs warm up before imaging
 const unsigned long POST_SHOT_MS     = 500;
-const unsigned long MOVE_PER_BOX_MS   = 1400; // [TUNE] land on each box
-const unsigned long MOVE_PER_SHELF_MS = 8000; // [TUNE]
-const unsigned long START_OFFSET_X_MS = 0;    // [CONFIRM]
-const unsigned long START_OFFSET_Y_MS = 0;    // [CONFIRM]
+// Calibrated 2026-07-04 (axis_calibration: 29.5 cm / 20 s = 1.475 cm/s, both axes):
+//   box pitch 3" = 7.62 cm -> 5166 ms; shelf pitch 31.6 cm -> 21424 ms, taken
+//   -10% to 19282 by operator on the bench run; first box ~1" right of home.
+const unsigned long MOVE_PER_BOX_MS   = 5166;  // box pitch (3")
+const unsigned long MOVE_PER_SHELF_MS = 19282; // shelf pitch (31.6 cm, cal -10%)
+const unsigned long START_OFFSET_X_MS = 1722;  // jog right to box 1 (~1")
+const unsigned long START_OFFSET_Y_MS = 0;     // shelf 1 at home height
 const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before stepping
+
+// Vertical home seating + LEVELING. homeToSensors() stops on the single vertical
+// sensor, which can leave the gantry slightly tilted (right side high). We then
+// drive DOWN ~1 cm into the physical stops so BOTH ganged Y motors bottom out and
+// level -- the higher side keeps stepping until it hits its stop; the already-
+// seated side just skips steps harmlessly against the stop. This also makes the
+// between-cycle de-energize drop-free (resting on the stop). Next cycle we rise
+// until the sensor clears, then drive back down to re-home + re-level.
+const unsigned long VERT_SEAT_MS         = 680;  // ~1 cm down into the stops [TUNE]
+const unsigned long VERT_CLEAR_MARGIN_MS = 300;  // extra up after sensor clears [TUNE]
 
 // ---------------- State --------------------------------------
 bool  calibrated      = false;
+bool  firstCycle      = true; // first imaging cycle gets the longer light warm-up
 float dayElapsedHours = 0;    // position within the 24h light cycle
 
 void setup() {
@@ -126,11 +142,9 @@ void setup() {
   pinMode(cameraPin, OUTPUT);
   digitalWrite(cameraPin, LOW);
 
-  if (ENABLE_SHELF_LIGHTS) {
-    for (int i = 0; i < numShelves; i++) {
-      pinMode(shelfRelayPins[i], OUTPUT);
-      digitalWrite(shelfRelayPins[i], RELAY_OFF);
-    }
+  if (ENABLE_LIGHTS) {
+    pinMode(ledRelayPin, OUTPUT);
+    digitalWrite(ledRelayPin, RELAY_OFF);   // lights off until a cycle runs
   }
 
   // ---- Banner ----
@@ -167,12 +181,21 @@ void loop() {
 
   bool dayTime = (dayElapsedHours < dayHours);
 
+  // All LEDs are on ONE relay -- switch on once for the whole sweep. The first
+  // cycle waits ~10 s so the LEDs fully warm up/stabilize before any imaging;
+  // later cycles just use the short settle.
+  if (ENABLE_LIGHTS) {
+    digitalWrite(ledRelayPin, RELAY_ON);
+    delay(firstCycle ? LIGHT_WARMUP_MS : LIGHT_SETTLE_MS);
+    firstCycle = false;
+  }
+
   // Snake: first shelf sweeps right, direction flips each shelf.
   boolean dir = right;
   for (int shelf = 1; shelf <= numShelves; shelf++) {
     checkKillSignal();
     Serial.print("Photographing shelf "); Serial.println(shelf);
-    photographShelf(shelf, dir, dayTime);
+    photographShelf(dir);
 
     if (shelf < numShelves) {
       Serial.println("Moving up to next shelf...");
@@ -183,6 +206,9 @@ void loop() {
 
   Serial.println("Photography sequence complete! Returning home...");
   returnHome();
+
+  // At night, cut the lights between cycles; in daylight leave them on.
+  if (ENABLE_LIGHTS && !dayTime) digitalWrite(ledRelayPin, RELAY_OFF);
 
   // De-energize the steppers for the idle wait: no holding current means no
   // motor heat in the growth chamber between cycles. They are re-engaged and
@@ -206,35 +232,23 @@ void loop() {
 }
 
 // Take photosPerShelf pictures across one shelf in snake direction `dir`.
-void photographShelf(int shelf, boolean dir, bool dayTime) {
+void photographShelf(boolean dir) {
   digitalWrite(dirPinX, dir);
   for (int box = 0; box < photosPerShelf; box++) {
     checkKillSignal();
-    takePhoto(shelf, dayTime);
+    takePhoto();
     if (box < photosPerShelf - 1) {
       moveHorizontal(dir, MOVE_PER_BOX_MS);
     }
   }
 }
 
-// Light the shelf (if enabled), pulse the camera trigger, then -- at
-// night only -- switch the light back off.
-void takePhoto(int shelf, bool dayTime) {
-  int relay = shelfRelayPins[shelf - 1];
-
-  if (ENABLE_SHELF_LIGHTS) {
-    digitalWrite(relay, RELAY_ON);
-    delay(LIGHT_SETTLE_MS);
-  }
-
+// Lights are already on (single relay, whole run). Just pulse the camera.
+void takePhoto() {
   digitalWrite(cameraPin, HIGH);
   delay(CAMERA_PULSE_MS);
   digitalWrite(cameraPin, LOW);
   delay(POST_SHOT_MS);
-
-  if (ENABLE_SHELF_LIGHTS && !dayTime) {
-    digitalWrite(relay, RELAY_OFF);
-  }
 }
 
 void moveHorizontal(boolean direction, unsigned long durationMs) {
@@ -264,8 +278,8 @@ void moveVertical(boolean direction, unsigned long durationMs) {
 void calibrate() {
   Serial.println("Calibration step 1: Moving right for 5 seconds...");
   moveHorizontal(right, 5000);
-  Serial.println("Calibration step 2: Moving up for 5 seconds...");
-  moveVertical(up, 5000);
+  Serial.println("Calibration step 2: Rising until vertical sensor clears...");
+  raiseVertClearOfSensor();
 
   Serial.println("Calibration step 3: Finding photointerrupters...");
   homeToSensors();
@@ -278,7 +292,7 @@ void calibrate() {
 
 void returnHome() {
   Serial.println("Returning to home position using photointerrupters...");
-  homeToSensors();
+  homeToSensors();   // homeToSensors now seats ~1 cm into the stops + levels
 }
 
 // Power the steppers on (active-LOW enable) and give the drivers a moment to
@@ -314,8 +328,27 @@ void homeToSensors() {
     delayMicroseconds(STEP_DELAY_US);
   }
 
+  // Seat ~1 cm DOWN into the physical stops to LEVEL the gantry: both ganged Y
+  // motors bottom out (the higher/right side keeps stepping until it hits its
+  // stop; the seated side skips steps harmlessly). Also parks it drop-free.
+  moveVertical(down, VERT_SEAT_MS);
+
   digitalWrite(dirPinX, right);
   digitalWrite(dirPinY, up);
+}
+
+// Rise until the vertical photointerrupter reads CLEAR (flag out of the slot),
+// then a small margin more. Used at cycle start to lift off the bottom stop and
+// uncover the sensor, so homeToSensors() can then re-seat a clean home.
+void raiseVertClearOfSensor() {
+  digitalWrite(dirPinY, up);
+  while (digitalRead(vertSensor) == LOW) {
+    digitalWrite(stepPinY, HIGH);
+    delayMicroseconds(STEP_DELAY_US);
+    digitalWrite(stepPinY, LOW);
+    delayMicroseconds(STEP_DELAY_US);
+  }
+  moveVertical(up, VERT_CLEAR_MARGIN_MS);
 }
 
 // =============================================================
@@ -344,14 +377,21 @@ void checkKillSignal() {
 
 // Emergency stop: lights off, motors disabled, halt forever.
 void haltOnKill() {
-  if (ENABLE_SHELF_LIGHTS) {
-    for (int i = 0; i < numShelves; i++) {
-      digitalWrite(shelfRelayPins[i], RELAY_OFF);
-    }
-  }
-  digitalWrite(enblPinX, HIGH);  // HIGH = disabled
+  if (ENABLE_LIGHTS) digitalWrite(ledRelayPin, RELAY_OFF);
+
+  // Graceful shutdown: bring the gantry HOME and seat it on the bottom stop
+  // BEFORE cutting motor power, so the non-self-locking vertical belt axis parks
+  // safely (rests on the stop) instead of being de-energized mid-travel and
+  // free-dropping. engageMotors() first in case the kill arrived while the
+  // steppers were disabled (handshake or the idle wait between cycles).
+  Serial.println("KILL received - homing before power-off...");
+  Serial.flush();
+  engageMotors();
+  homeToSensors();   // homes + seats ~1 cm into the stops + levels the gantry
+
+  digitalWrite(enblPinX, HIGH);  // now safe to de-energize -- resting on the stop
   digitalWrite(enblPinY, HIGH);
-  Serial.println("KILL received - motors disabled, halting.");
+  Serial.println("Homed, motors disabled, halting.");
   Serial.flush();
   while (1);
 }

@@ -14,19 +14,19 @@ from pathlib import Path
 # the interactive prompts override that.
 DEFAULTS = {
     "com_port": "COM4",
-    "num_shelves": 3,
+    "num_shelves": 4,
     "photos_per_shelf": 8,
     "cycle_interval_min": 15,
     "day_hours": 24,          # 24 = constant light
     "start_hour": 0,
-    "image_dir": r"D:\images\robot4",
+    "image_dir": r"C:\Users\zhu.lab\Desktop\robotic_imaging",
     "kill_margin_min": 2,     # grace added to the cycle interval before a kill
 }
 
 # (low, high) inclusive bounds for numeric prompts.
 BOUNDS = {
-    "num_shelves": (1, 6),
-    "photos_per_shelf": (1, 20),
+    "num_shelves": (1, 4),   # this rig has 4 shelves
+    "photos_per_shelf": (1, 8),   # this rig has 8 boxes per shelf
     "cycle_interval_min": (1, 240),
     "day_hours": (0, 24),
     "start_hour": (0, 24),

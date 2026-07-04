@@ -3,10 +3,10 @@
 # press Enter at each prompt to accept the value here.
 
 com_port = "COM4"
-num_shelves = 3
+num_shelves = 4
 photos_per_shelf = 8
 cycle_interval_min = 15
 day_hours = 24            # 24 = constant light
 start_hour = 0
-image_dir = 'D:\images\robot4'
+image_dir = 'C:\Users\zhu.lab\Desktop\robotic_imaging'
 kill_margin_min = 2       # grace added to the cycle interval before a kill
