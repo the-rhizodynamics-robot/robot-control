@@ -16,4 +16,4 @@ kill_margin_min = 2       # grace added to the cycle interval before a kill
 # camera isn't available it falls back to the manual "point SpinView here"
 # prompt. Requires running the host from an env that has PySpin + pyserial.
 use_internal_capture = true
-camera_user_set = ""      # camera User Set to load at start (e.g. "UserSet1"); "" = leave as-is
+camera_user_set = "UserSet1"  # camera User Set the runner loads at start ("" = leave as-is)
