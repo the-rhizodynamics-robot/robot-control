@@ -10,3 +10,10 @@ day_hours = 24            # 24 = constant light
 start_hour = 0
 image_dir = 'C:\Users\zhu.lab\Desktop\robotic_imaging'
 kill_margin_min = 2       # grace added to the cycle interval before a kill
+
+# In-process camera capture (PySpin). If true, the host grabs each hardware-
+# triggered frame and saves a JPG into the run folder itself; if PySpin or a
+# camera isn't available it falls back to the manual "point SpinView here"
+# prompt. Requires running the host from an env that has PySpin + pyserial.
+use_internal_capture = true
+camera_user_set = ""      # camera User Set to load at start (e.g. "UserSet1"); "" = leave as-is
