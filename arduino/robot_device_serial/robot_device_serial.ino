@@ -87,12 +87,13 @@ const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before ste
 
 // Vertical home seating + LEVELING. homeToSensors() stops on the single vertical
 // sensor, which can leave the gantry slightly tilted (right side high). We then
-// drive DOWN ~1 cm into the physical stops so BOTH ganged Y motors bottom out and
-// level -- the higher side keeps stepping until it hits its stop; the already-
+// drive DOWN a short distance (~0.2 cm, tuned) into the physical stops so BOTH
+// ganged Y motors bottom out and level -- the higher side keeps stepping until it
+// hits its stop; the already-
 // seated side just skips steps harmlessly against the stop. This also makes the
 // between-cycle de-energize drop-free (resting on the stop). Next cycle we rise
 // until the sensor clears, then drive back down to re-home + re-level.
-const unsigned long VERT_SEAT_MS         = 680;  // ~1 cm down into the stops [TUNE]
+const unsigned long VERT_SEAT_MS         = 150;  // ~0.2 cm down into the stops (tuned) [TUNE]
 const unsigned long VERT_CLEAR_MARGIN_MS = 300;  // extra up after sensor clears [TUNE]
 
 // ---------------- State --------------------------------------
@@ -328,7 +329,7 @@ void homeToSensors() {
     delayMicroseconds(STEP_DELAY_US);
   }
 
-  // Seat ~1 cm DOWN into the physical stops to LEVEL the gantry: both ganged Y
+  // Seat a short distance DOWN (~0.2 cm) into the physical stops to LEVEL the gantry: both ganged Y
   // motors bottom out (the higher/right side keeps stepping until it hits its
   // stop; the seated side skips steps harmlessly). Also parks it drop-free.
   moveVertical(down, VERT_SEAT_MS);
