@@ -23,7 +23,7 @@ and repeats on a fixed schedule. The system has two halves:
   - *Horizontal (X):* moves the camera left/right across a shelf.
   - *Vertical (Y):* moves between shelves.
 - **Homing:** two photointerrupters (one per axis) establish a repeatable home position.
-- **Camera:** a FLIR/Point Grey camera captured by **FlyCap** on the host PC, fired by
+- **Camera:** a FLIR/Point Grey camera captured by **FlyCap/Spinnaker** on the host PC, fired by
   a hardware trigger from the Arduino. **The capture software must be running and saving
   to the configured image directory** for a run to produce images.
 - **Lighting:** one relay per shelf (active-LOW) for grow lights.
@@ -117,7 +117,7 @@ early in each interval, right after the photos for that cycle are taken.
   pip install -r python_runner/requirements.txt
   ```
 - The `robot_device_serial.ino` sketch flashed to the Arduino (Arduino IDE).
-- **FlyCap running** and saving images to the directory you'll configure.
+- **FlyCap/Spinnaker running** and saving images to the directory you'll configure.
 - **Close the Arduino IDE Serial Monitor** before running the host — only one program
   can hold the COM port at a time.
 
@@ -143,7 +143,7 @@ python -m robot_host
 ```
 
 You'll be prompted for the run configuration (press **Enter** to accept each
-`[default]`); defaults come from `config.toml`. After confirming FlyCap is running,
+`[default]`); defaults come from `config.toml`. After confirming FlyCap/Spinnaker is running,
 the host opens the port, performs the handshake (each value should log `... -> OK`),
 and begins supervising. Output goes to stdout and to `robot_host.log`.
 
@@ -174,8 +174,8 @@ creates a fresh per-run folder inside it named:
 ```
 
 (timestamp to the second; the timestamp itself has no underscores). The host prints this
-path and points the watchdog at it — **repoint FlyCap to save into this new folder each
-run** (it's printed at the "Confirm FlyCap…" prompt).
+path and points the watchdog at it — **repoint FlyCap/Spinnaker to save into this new folder each
+run** (it's printed at the "Confirm FlyCap/Spinnaker…" prompt).
 
 > ⚠️ **The trailing `_<shelves>_<boxes>` is a contract with downstream processing.** The
 > [file-sorting](https://github.com/the-rhizodynamics-robot/file-sorting) pipeline reads the

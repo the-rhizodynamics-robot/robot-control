@@ -35,8 +35,8 @@ def main() -> None:
     cfg = prompt_config(load_defaults())
 
     # Mint the per-run output folder inside the operator's chosen path and
-    # point the rest of the run at it. Done before the FlyCap prompt so the
-    # operator can copy this exact path into the capture software.
+    # point the rest of the run at it. Done before the FlyCap/Spinnaker prompt
+    # so the operator can copy this exact path into the capture software.
     run_dir = make_run_dir(cfg.image_dir, cfg.num_shelves, cfg.photos_per_shelf)
     cfg.image_dir = str(run_dir)
 
@@ -47,7 +47,7 @@ def main() -> None:
     )
     logger.info("Run output folder: %s", run_dir)
 
-    input(f"\nPoint FlyCap to save into {cfg.image_dir} and confirm it is "
+    input(f"\nPoint FlyCap/Spinnaker to save into {cfg.image_dir} and confirm it is "
           "running, then press Enter to start... ")
 
     link: RobotLink | None = None
