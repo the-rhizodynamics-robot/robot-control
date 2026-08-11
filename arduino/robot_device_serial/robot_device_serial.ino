@@ -85,6 +85,25 @@ const unsigned long START_OFFSET_X_MS = 1722;  // jog right to box 1 (~1")
 const unsigned long START_OFFSET_Y_MS = 0;     // shelf 1 at home height
 const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before stepping
 
+// ---------------- Idle holding current -----------------------
+// Keep the steppers ENERGIZED through the wait between cycles instead of
+// releasing them. Costs holding current (~5 W per NEMA 17 at 1.9 A/phase --
+// dissipation is P ~= I_peak^2 * R_phase and is position-independent, so ~15 W
+// for all three motors, ~4 W if the DQ542MA half-current idle jumper is set).
+// That is negligible against the chamber's LED load, which is what its cooling
+// is sized for.
+//
+// What this buys: the gantry cannot drift, sag, or be nudged while idle, the
+// drivers never see a de-energize transient on a loaded axis (the regen
+// over-voltage that alarmed both DQ542MAs during bench testing), and the motors
+// sit at a constant temperature instead of heating and cooling every cycle.
+//
+// What it does NOT buy: this cannot affect jitter that happens DURING a move.
+// Idle drift is already discarded because loop() re-homes at the start of every
+// cycle regardless. Set false to restore the previous release-when-idle
+// behaviour. Does not apply before the handshake -- see setup().
+const boolean HOLD_BETWEEN_CYCLES = true;
+
 // Vertical home seating + LEVELING. homeToSensors() stops on the single vertical
 // sensor, which can leave the gantry slightly tilted (right side high). We then
 // drive DOWN a short distance (~0.2 cm, tuned) into the physical stops so BOTH
@@ -100,6 +119,8 @@ const unsigned long VERT_CLEAR_MARGIN_MS = 300;  // extra up after sensor clears
 bool  calibrated      = false;
 bool  firstCycle      = true; // first imaging cycle gets the longer light warm-up
 float dayElapsedHours = 0;    // position within the 24h light cycle
+bool  motorsEnergized = false; // tracks the enable pins so engageMotors() only
+                               // pays MOTOR_SETTLE_MS on a real off->on transition
 
 void setup() {
   Serial.begin(9600);
@@ -131,10 +152,11 @@ void setup() {
   pinMode(stepPinY, OUTPUT); pinMode(dirPinY, OUTPUT); pinMode(enblPinY, OUTPUT);
   digitalWrite(stepPinX, LOW);   digitalWrite(stepPinY, LOW);
   digitalWrite(dirPinX, right);  digitalWrite(dirPinY, up);
-  // Steppers were already disabled at the top of setup(); keep them that way.
-  // They are only powered while a cycle is actively running (engaged at the top
-  // of loop(), released after returnHome()), so they never dump holding-current
-  // heat into the growth chamber while idle. HIGH = disabled.
+  // Steppers were already disabled at the top of setup(); keep them that way
+  // until the first cycle engages them. Holding current before that point would
+  // clamp an UNCALIBRATED position for however long the robot waits on the host,
+  // which buys nothing -- the first thing loop() does is re-home. HOLD_BETWEEN_-
+  // CYCLES governs the wait BETWEEN cycles only, not this one. HIGH = disabled.
   digitalWrite(enblPinX, HIGH);  digitalWrite(enblPinY, HIGH);
 
   pinMode(horizSensor, INPUT_PULLUP);
@@ -163,12 +185,12 @@ void setup() {
 void loop() {
   unsigned long cycleStart = millis();
 
-  // Motors are de-energized during the inter-cycle wait so their holding
-  // current does not heat the growth chamber. Re-engage and re-home at the
-  // START of every cycle: while unpowered the gantry may have drifted or the
-  // vertical carriage sagged, so we must re-establish position before any move
-  // that depends on it. calibrate() jogs clear of the flags first, so it
-  // re-seats correctly even if the carriage sagged below the sensor.
+  // Make sure the steppers are live (a no-op when HOLD_BETWEEN_CYCLES kept them
+  // energized through the wait). Re-home at the START of every cycle either way:
+  // holding current is not a position guarantee -- a bumped gantry, a missed
+  // step, or a power blip all leave us somewhere unknown, and after a release
+  // the carriage may also have sagged. calibrate() jogs clear of the flags
+  // first, so it re-seats correctly even if the carriage sagged below the sensor.
   engageMotors();
   if (!calibrated) {
     Serial.println("Starting calibration sequence...");
@@ -211,10 +233,14 @@ void loop() {
   // At night, cut the lights between cycles; in daylight leave them on.
   if (ENABLE_LIGHTS && !dayTime) digitalWrite(ledRelayPin, RELAY_OFF);
 
-  // De-energize the steppers for the idle wait: no holding current means no
-  // motor heat in the growth chamber between cycles. They are re-engaged and
-  // re-homed at the top of the next cycle.
-  disengageMotors();
+  // Idle wait: either hold position under current, or release. returnHome() has
+  // just seated the carriage on its bottom stop, so releasing here is drop-free
+  // (that seating is what makes the release path safe -- see disengageMotors()).
+  if (HOLD_BETWEEN_CYCLES) {
+    Serial.println("Holding position (motors energized) until next cycle.");
+  } else {
+    disengageMotors();
+  }
 
   // ---- HOME REPORT: tell the host the cycle finished ----
   Serial.println("home");
@@ -299,16 +325,22 @@ void returnHome() {
 // Power the steppers on (active-LOW enable) and give the drivers a moment to
 // energize before any stepping, so the first moves don't lose steps.
 void engageMotors() {
+  if (motorsEnergized) return;   // already holding (HOLD_BETWEEN_CYCLES): no
+                                 // transient to wait out, so skip the settle
   digitalWrite(enblPinX, LOW);
   digitalWrite(enblPinY, LOW);
+  motorsEnergized = true;
   delay(MOTOR_SETTLE_MS);
 }
 
-// Power the steppers off so they draw no holding current (and shed no heat)
-// while the gantry is idle between cycles.
+// Power the steppers off so they draw no holding current (and shed no heat).
+// ONLY safe when the vertical carriage is seated on its bottom stop: cutting
+// power to a raised, loaded Y axis lets it drop, back-driving the motors as
+// generators into the shared 24 V bus (regen over-voltage -> driver alarm).
 void disengageMotors() {
   digitalWrite(enblPinX, HIGH);
   digitalWrite(enblPinY, HIGH);
+  motorsEnergized = false;
 }
 
 // Drive down + left until BOTH photointerrupters trigger (read LOW).
@@ -384,14 +416,14 @@ void haltOnKill() {
   // BEFORE cutting motor power, so the non-self-locking vertical belt axis parks
   // safely (rests on the stop) instead of being de-energized mid-travel and
   // free-dropping. engageMotors() first in case the kill arrived while the
-  // steppers were disabled (handshake or the idle wait between cycles).
+  // steppers were disabled (handshake, or the idle wait when HOLD_BETWEEN_CYCLES
+  // is false); it is a no-op when they were already holding.
   Serial.println("KILL received - homing before power-off...");
   Serial.flush();
   engageMotors();
   homeToSensors();   // homes + seats ~1 cm into the stops + levels the gantry
 
-  digitalWrite(enblPinX, HIGH);  // now safe to de-energize -- resting on the stop
-  digitalWrite(enblPinY, HIGH);
+  disengageMotors();  // now safe -- resting on the stop
   Serial.println("Homed, motors disabled, halting.");
   Serial.flush();
   while (1);
