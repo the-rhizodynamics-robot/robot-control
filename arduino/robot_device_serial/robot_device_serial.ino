@@ -97,11 +97,34 @@ const unsigned long HOME_JOG_MS           = 5000;  // calibrate()'s pre-homing j
 const unsigned long HOME_TIMEOUT_FACTOR   = 3;     // margin over worst-case travel
 const unsigned long HOME_TIMEOUT_FLOOR_MS = 60000; // never trip earlier than this
 
+// Catch-all budget for one cycle's WORK (calibrate -> sweep -> returnHome), not
+// counting the idle wait that follows. Deliberately loose: the per-operation
+// homing budget above is the tight bound that limits how long a stalled motor
+// can grind, so this only has to catch loops nobody bounded -- present or
+// future -- and it costs nothing to be generous.
+//
+// For scale, a 4-shelf / 8-box rig at this firmware's tuning does ~5-6 min of
+// work per cycle, so 15 min is roughly 3x. The host's own watchdog
+// (cycle_interval + kill_margin) is usually the TIGHTER of the two and will
+// normally trip first -- that is fine and intended: guard() polls for the kill,
+// so the host can always be heard. This budget is the backstop for when the
+// serial link is dead and nobody is listening.
+const unsigned long CYCLE_WORK_BUDGET_MS = 15UL * 60UL * 1000UL;
+
+// How often guard() actually does its checks, in step pulses. 256 steps at
+// ~200 us/step is ~50 ms -- frequent enough to be responsive, rare enough that
+// the polling costs nothing inside a 5 kHz stepping loop.
+const unsigned int GUARD_EVERY_STEPS = 256;
+
 // ---------------- State --------------------------------------
 bool  calibrated      = false;
 float dayElapsedHours = 0;    // position within the 24h light cycle
 unsigned long homeTimeoutMs = 0;  // derived after handshake (see above)
 unsigned long faultLowerMs  = 0;  // budget for the fault-path powered descent
+unsigned long workStartMs   = 0;  // when this cycle's work began
+bool  workTimingActive      = false; // false during the idle wait (no deadline)
+unsigned int  guardCounter  = 0;  // step counter for guard()'s duty cycle
+bool  halting               = false; // set once a halt path starts; stops re-entry
 
 void setup() {
   Serial.begin(9600);
@@ -186,6 +209,12 @@ void setup() {
 void loop() {
   unsigned long cycleStart = millis();
 
+  // Open the work window. guard() enforces CYCLE_WORK_BUDGET_MS against this
+  // from inside every stepping loop; it is closed again before the idle wait
+  // below, which is allowed to take as long as the cycle interval says.
+  workStartMs      = cycleStart;
+  workTimingActive = true;
+
   // Motors are de-energized during the inter-cycle wait so their holding
   // current does not heat the growth chamber. Re-engage and re-home at the
   // START of every cycle: while unpowered the gantry may have drifted or the
@@ -227,7 +256,16 @@ void loop() {
   // re-homed at the top of the next cycle.
   disengageMotors();
 
+  // Work is done; the idle wait is not held to the work budget.
+  workTimingActive = false;
+
   // ---- HOME REPORT: tell the host the cycle finished ----
+  // The work duration goes out first, on its own line. wait_for_home() matches
+  // "home" EXACTLY, so extra lines are passed through to the host log rather
+  // than mistaken for a completed cycle -- which makes this the measured number
+  // to set CYCLE_WORK_BUDGET_MS (and the homing factor) from, once some runs
+  // have banked real values.
+  Serial.print("cycle_work_ms "); Serial.println(millis() - cycleStart);
   Serial.println("home");
   Serial.flush();
 
@@ -279,6 +317,7 @@ void moveHorizontal(boolean direction, unsigned long durationMs) {
   digitalWrite(dirPinX, direction);
   unsigned long t0 = millis();
   while (millis() - t0 < durationMs) {
+    guard();
     digitalWrite(stepPinX, HIGH);
     delayMicroseconds(STEP_DELAY_US);
     digitalWrite(stepPinX, LOW);
@@ -290,10 +329,35 @@ void moveVertical(boolean direction, unsigned long durationMs) {
   digitalWrite(dirPinY, direction);
   unsigned long t0 = millis();
   while (millis() - t0 < durationMs) {
+    guard();
     digitalWrite(stepPinY, HIGH);
     delayMicroseconds(STEP_DELAY_US);
     digitalWrite(stepPinY, LOW);
     delayMicroseconds(STEP_DELAY_US);
+  }
+}
+
+// Called from inside every stepping loop. Two jobs, both of which the firmware
+// previously could not do while moving:
+//
+//   1. Poll for the host's kill. checkKillSignal() was only reachable from
+//      loop() and photographShelf(), so a kill sent during a move -- or during
+//      homing -- was not read until the move ended, and in an unbounded loop
+//      was never read at all. The host's home-to-home watchdog would fire, send
+//      KILLCODE, and nothing would be listening.
+//   2. Enforce the cycle work budget, so ANY blocking loop is bounded, not just
+//      the ones with their own timeout.
+//
+// Cheap by construction: the real work runs once per GUARD_EVERY_STEPS.
+void guard() {
+  if (++guardCounter < GUARD_EVERY_STEPS) return;
+  guardCounter = 0;
+
+  checkKillSignal();   // may not return
+
+  // Subtraction (not addition) so this is safe across the millis() rollover.
+  if (workTimingActive && (millis() - workStartMs) > CYCLE_WORK_BUDGET_MS) {
+    faultHalt("cycle work budget exceeded");   // does not return
   }
 }
 
@@ -348,7 +412,12 @@ void homeToSensors() {
 
     // Never spin here forever: an obstructed axis would stall against the
     // obstruction at full current with no way for the host to intervene.
-    if (millis() - t0 > homeTimeoutMs) faultHalt(vTrig, hTrig);   // does not return
+    if (millis() - t0 > homeTimeoutMs) {
+      Serial.print("FAULT: vertical ");   Serial.println(vTrig ? "reached flag" : "DID NOT REACH FLAG");
+      Serial.print("FAULT: horizontal "); Serial.println(hTrig ? "reached flag" : "DID NOT REACH FLAG");
+      faultHalt("homing timed out");   // does not return
+    }
+    guard();
 
     if (!vTrig) digitalWrite(stepPinY, HIGH);
     if (!hTrig) digitalWrite(stepPinX, HIGH);
@@ -389,18 +458,19 @@ bool lowerVerticalToStop(unsigned long budgetMs) {
   return digitalRead(vertSensor) == LOW;
 }
 
-// Terminal: homing did not finish within its budget. Stepping has already
-// stopped (the caller left its loop), which ends the stall. Report which axis
-// failed, park the carriage safely, then halt -- a gantry that cannot find home
-// must not keep imaging, and recovery should be a deliberate human power cycle.
-void faultHalt(bool vertHomed, bool horizHomed) {
+// Terminal: a motion budget was exceeded. Stepping has already stopped (the
+// caller left its loop), which is what ends the stall. Park the carriage
+// safely, then halt -- a gantry that cannot find home must not keep imaging,
+// and recovery should be a deliberate human power cycle.
+void faultHalt(const char *reason) {
+  halting = true;   // no re-entry: nothing below may bounce back through here
   lightsOff();
-  Serial.println("FAULT: homing timed out.");
-  Serial.print("FAULT: vertical ");   Serial.println(vertHomed  ? "reached flag" : "DID NOT REACH FLAG");
-  Serial.print("FAULT: horizontal "); Serial.println(horizHomed ? "reached flag" : "DID NOT REACH FLAG");
+  Serial.print("FAULT: "); Serial.println(reason);
   Serial.flush();
 
-  if (vertHomed || lowerVerticalToStop(faultLowerMs)) {
+  // lowerVerticalToStop() returns immediately if the flag is already made, so
+  // this covers both "vertical was fine" and "vertical is somewhere unknown".
+  if (lowerVerticalToStop(faultLowerMs)) {
     disengageMotors();
     Serial.println("FAULT: carriage on its stop, motors disabled. Power-cycle to reset.");
   } else {
@@ -430,6 +500,7 @@ int waitForValue() {
 
 // Non-blocking: if the host has sent the killcode, stop immediately.
 void checkKillSignal() {
+  if (halting) return;   // a halt path is already running; do not re-enter it
   if (Serial.available() > 0) {
     int val = Serial.readString().toInt();
     if (val == KILLCODE) haltOnKill();
@@ -439,6 +510,7 @@ void checkKillSignal() {
 
 // Emergency stop: lights off, motors disabled, halt forever.
 void haltOnKill() {
+  halting = true;   // guard()/checkKillSignal() must not re-enter from here
   lightsOff();
   digitalWrite(enblPinX, HIGH);  // HIGH = disabled
   digitalWrite(enblPinY, HIGH);
