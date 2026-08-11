@@ -115,12 +115,54 @@ const boolean HOLD_BETWEEN_CYCLES = true;
 const unsigned long VERT_SEAT_MS         = 150;  // ~0.2 cm down into the stops (tuned) [TUNE]
 const unsigned long VERT_CLEAR_MARGIN_MS = 300;  // extra up after sensor clears [TUNE]
 
+// ---------------- Homing fault detection ---------------------
+// homeToSensors() drives until BOTH flags trigger. If an axis cannot get there
+// -- a jam, an obstruction, a failed or dirty sensor, a snapped belt -- an
+// unbounded wait pulses step into a stalled motor indefinitely: the driver
+// keeps pushing full rated current into a locked rotor, the gantry grinds, and
+// the host cannot intervene because checkKillSignal() is not reachable from
+// inside that loop. Only a power cycle would stop it.
+//
+// The budget is DERIVED from the run geometry (handshake) and this rig's own
+// motion constants rather than hardcoded, so it travels to robots with a
+// different shelf count, box count, or rail length. Worst case is homing from
+// the far corner: full travel of the slower axis, plus the jog calibrate()
+// makes clear of the flags first.
+const unsigned long HOME_JOG_MS           = 5000;  // calibrate()'s pre-homing jog
+const unsigned long HOME_TIMEOUT_FACTOR   = 3;     // margin over worst-case travel
+const unsigned long HOME_TIMEOUT_FLOOR_MS = 60000; // never trip earlier than this
+
+// Catch-all budget for one cycle's WORK (calibrate -> sweep -> returnHome), not
+// counting the idle wait that follows. Deliberately loose: the per-operation
+// homing budget above is the tight bound that limits how long a stalled motor
+// can grind, so this only has to catch loops nobody bounded -- present or
+// future -- and it costs nothing to be generous.
+//
+// For scale, a 4-shelf / 8-box rig at this firmware's tuning does ~5-6 min of
+// work per cycle, so 15 min is roughly 3x. The host's own watchdog
+// (cycle_interval + kill_margin) is usually the TIGHTER of the two and will
+// normally trip first -- that is fine and intended: guard() polls for the kill,
+// so the host can always be heard. This budget is the backstop for when the
+// serial link is dead and nobody is listening.
+const unsigned long CYCLE_WORK_BUDGET_MS = 15UL * 60UL * 1000UL;
+
+// How often guard() actually does its checks, in step pulses. 256 steps at
+// ~200 us/step is ~50 ms -- frequent enough to be responsive, rare enough that
+// the polling costs nothing inside a 5 kHz stepping loop.
+const unsigned int GUARD_EVERY_STEPS = 256;
+
 // ---------------- State --------------------------------------
 bool  calibrated      = false;
 bool  firstCycle      = true; // first imaging cycle gets the longer light warm-up
 float dayElapsedHours = 0;    // position within the 24h light cycle
 bool  motorsEnergized = false; // tracks the enable pins so engageMotors() only
                                // pays MOTOR_SETTLE_MS on a real off->on transition
+unsigned long homeTimeoutMs = 0;  // derived after handshake (see above)
+unsigned long faultLowerMs  = 0;  // budget for the fault-path powered descent
+unsigned long workStartMs   = 0;  // when this cycle's work began
+bool  workTimingActive      = false; // false during the idle wait (no deadline)
+unsigned int  guardCounter  = 0;  // step counter for guard()'s duty cycle
+bool  halting               = false; // set once a halt path starts; stops re-entry
 
 void setup() {
   Serial.begin(9600);
@@ -146,6 +188,23 @@ void setup() {
   if (numShelves > MAX_SHELVES) numShelves = MAX_SHELVES;
   cycleIntervalMs = (unsigned long)cycleIntervalMin * 60000UL;
   dayElapsedHours = startHour;
+
+  // Homing budget, from the geometry just received. homeToSensors() drives BOTH
+  // axes in one loop at the same step rate, so worst-case homing time is the
+  // SLOWER axis's full travel (a max, not a sum), plus calibrate()'s jog clear
+  // of the flags. Shelf 1 sits START_OFFSET_Y_MS above home, so the vertical
+  // span is (numShelves - 1) pitches; likewise (photosPerShelf - 1) horizontally.
+  unsigned long vertTravelMs  = (unsigned long)(numShelves > 1 ? numShelves - 1 : 1)
+                                * MOVE_PER_SHELF_MS + START_OFFSET_Y_MS;
+  unsigned long horizTravelMs = (unsigned long)(photosPerShelf > 1 ? photosPerShelf - 1 : 1)
+                                * MOVE_PER_BOX_MS + START_OFFSET_X_MS;
+  unsigned long worstTravelMs = (vertTravelMs > horizTravelMs ? vertTravelMs : horizTravelMs)
+                                + HOME_JOG_MS;
+  homeTimeoutMs = worstTravelMs * HOME_TIMEOUT_FACTOR;
+  if (homeTimeoutMs < HOME_TIMEOUT_FLOOR_MS) homeTimeoutMs = HOME_TIMEOUT_FLOOR_MS;
+  // The fault path only has to bring the carriage DOWN, so it needs the vertical
+  // span alone -- plus the jog, since calibrate() may have raised it that far.
+  faultLowerMs = vertTravelMs + HOME_JOG_MS;
 
   // ---- Pin setup ----
   pinMode(stepPinX, OUTPUT); pinMode(dirPinX, OUTPUT); pinMode(enblPinX, OUTPUT);
@@ -180,10 +239,18 @@ void setup() {
   Serial.print("Will photograph ");  Serial.print(numShelves);
   Serial.print(" shelves with ");    Serial.print(photosPerShelf);
   Serial.println(" photos each");
+  Serial.print("Homing timeout: ");  Serial.print(homeTimeoutMs / 1000);
+  Serial.println(" s (derived from geometry)");
 }
 
 void loop() {
   unsigned long cycleStart = millis();
+
+  // Open the work window. guard() enforces CYCLE_WORK_BUDGET_MS against this
+  // from inside every stepping loop; it is closed again before the idle wait
+  // below, which is allowed to take as long as the cycle interval says.
+  workStartMs      = cycleStart;
+  workTimingActive = true;
 
   // Make sure the steppers are live (a no-op when HOLD_BETWEEN_CYCLES kept them
   // energized through the wait). Re-home at the START of every cycle either way:
@@ -242,7 +309,16 @@ void loop() {
     disengageMotors();
   }
 
+  // Work is done; the idle wait is not held to the work budget.
+  workTimingActive = false;
+
   // ---- HOME REPORT: tell the host the cycle finished ----
+  // The work duration goes out first, on its own line. wait_for_home() matches
+  // "home" EXACTLY, so extra lines are passed through to the host log rather
+  // than mistaken for a completed cycle -- which makes this the measured number
+  // to set CYCLE_WORK_BUDGET_MS (and the homing factor) from, once some runs
+  // have banked real values.
+  Serial.print("cycle_work_ms "); Serial.println(millis() - cycleStart);
   Serial.println("home");
   Serial.flush();
 
@@ -282,6 +358,7 @@ void moveHorizontal(boolean direction, unsigned long durationMs) {
   digitalWrite(dirPinX, direction);
   unsigned long t0 = millis();
   while (millis() - t0 < durationMs) {
+    guard();
     digitalWrite(stepPinX, HIGH);
     delayMicroseconds(STEP_DELAY_US);
     digitalWrite(stepPinX, LOW);
@@ -293,10 +370,37 @@ void moveVertical(boolean direction, unsigned long durationMs) {
   digitalWrite(dirPinY, direction);
   unsigned long t0 = millis();
   while (millis() - t0 < durationMs) {
+    guard();
     digitalWrite(stepPinY, HIGH);
     delayMicroseconds(STEP_DELAY_US);
     digitalWrite(stepPinY, LOW);
     delayMicroseconds(STEP_DELAY_US);
+  }
+}
+
+// Called from inside every stepping loop. Two jobs, both of which the firmware
+// previously could not do while moving:
+//
+//   1. Poll for the host's kill. checkKillSignal() was only reachable from
+//      loop() and photographShelf(), so a kill sent during a move -- or during
+//      homing -- was not read until the move ended, and in an unbounded loop
+//      was never read at all. The host's home-to-home watchdog would fire, send
+//      KILLCODE, and nothing would be listening.
+//   2. Enforce the cycle work budget, so ANY blocking loop is bounded, not just
+//      the ones with their own timeout.
+//
+// Cheap by construction: the real work runs once per GUARD_EVERY_STEPS.
+void guard() {
+  if (halting) return;   // a halt path is running (it may itself move the gantry
+                         // home); it must not be interrupted by kill or budget
+  if (++guardCounter < GUARD_EVERY_STEPS) return;
+  guardCounter = 0;
+
+  checkKillSignal();   // may not return
+
+  // Subtraction (not addition) so this is safe across the millis() rollover.
+  if (workTimingActive && (millis() - workStartMs) > CYCLE_WORK_BUDGET_MS) {
+    faultHalt("cycle work budget exceeded");   // does not return
   }
 }
 
@@ -343,15 +447,26 @@ void disengageMotors() {
   motorsEnergized = false;
 }
 
-// Drive down + left until BOTH photointerrupters trigger (read LOW).
+// Drive down + left until BOTH photointerrupters trigger (read LOW), or until
+// the derived budget expires -- see the homing-fault notes at the top.
 void homeToSensors() {
   digitalWrite(dirPinY, down);
   digitalWrite(dirPinX, left);
 
   bool vTrig = false, hTrig = false;
+  unsigned long t0 = millis();
   while (!vTrig || !hTrig) {
     if (digitalRead(vertSensor)  == LOW) vTrig = true;
     if (digitalRead(horizSensor) == LOW) hTrig = true;
+
+    // Never spin here forever: an obstructed axis would stall against the
+    // obstruction at full current with no way for the host to intervene.
+    if (millis() - t0 > homeTimeoutMs) {
+      Serial.print("FAULT: vertical ");   Serial.println(vTrig ? "reached flag" : "DID NOT REACH FLAG");
+      Serial.print("FAULT: horizontal "); Serial.println(hTrig ? "reached flag" : "DID NOT REACH FLAG");
+      faultHalt("homing timed out");   // does not return
+    }
+    guard();
 
     if (!vTrig) digitalWrite(stepPinY, HIGH);
     if (!hTrig) digitalWrite(stepPinX, HIGH);
@@ -370,18 +485,76 @@ void homeToSensors() {
   digitalWrite(dirPinY, up);
 }
 
+// All lights off. Shared by the kill and fault paths. This robot drives every
+// shelf from ONE relay, not the per-shelf bank the generic firmware assumes.
+void lightsOff() {
+  if (ENABLE_LIGHTS) digitalWrite(ledRelayPin, RELAY_OFF);
+}
+
+// Drive the carriage DOWN until the vertical flag triggers or `budgetMs` runs
+// out; true if it reached the stop.
+//
+// Fault path only. The point is to seat a possibly-raised carriage UNDER POWER
+// before cutting current: de-energizing a loaded vertical axis lets it drop,
+// back-driving the motors as generators into the shared supply, which has
+// tripped both drivers on regen over-voltage during bench testing. A controlled
+// descent avoids both that and the mechanical impact.
+bool lowerVerticalToStop(unsigned long budgetMs) {
+  digitalWrite(dirPinY, down);
+  unsigned long t0 = millis();
+  while (millis() - t0 < budgetMs) {
+    if (digitalRead(vertSensor) == LOW) return true;
+    digitalWrite(stepPinY, HIGH);
+    delayMicroseconds(STEP_DELAY_US);
+    digitalWrite(stepPinY, LOW);
+    delayMicroseconds(STEP_DELAY_US);
+  }
+  return digitalRead(vertSensor) == LOW;
+}
+
 // Rise until the vertical photointerrupter reads CLEAR (flag out of the slot),
 // then a small margin more. Used at cycle start to lift off the bottom stop and
 // uncover the sensor, so homeToSensors() can then re-seat a clean home.
+//
+// Bounded by guard(): if the flag never clears -- a jam, or a sensor stuck LOW
+// -- this would otherwise drive the carriage upward forever. That makes it the
+// same hazard as the homing loop, and worse in one respect: it runs every cycle
+// in normal operation, not only on the fault path.
 void raiseVertClearOfSensor() {
   digitalWrite(dirPinY, up);
   while (digitalRead(vertSensor) == LOW) {
+    guard();
     digitalWrite(stepPinY, HIGH);
     delayMicroseconds(STEP_DELAY_US);
     digitalWrite(stepPinY, LOW);
     delayMicroseconds(STEP_DELAY_US);
   }
   moveVertical(up, VERT_CLEAR_MARGIN_MS);
+}
+
+// Terminal: a motion budget was exceeded. Stepping has already stopped (the
+// caller left its loop), which is what ends the stall. Park the carriage
+// safely, then halt -- a gantry that cannot find home must not keep imaging,
+// and recovery should be a deliberate human power cycle.
+void faultHalt(const char *reason) {
+  halting = true;   // no re-entry: nothing below may bounce back through here
+  lightsOff();
+  Serial.print("FAULT: "); Serial.println(reason);
+  Serial.flush();
+
+  // lowerVerticalToStop() returns immediately if the flag is already made, so
+  // this covers both "vertical was fine" and "vertical is somewhere unknown".
+  if (lowerVerticalToStop(faultLowerMs)) {
+    disengageMotors();
+    Serial.println("FAULT: carriage on its stop, motors disabled. Power-cycle to reset.");
+  } else {
+    // Could not seat it, so the vertical axis is stuck somewhere loaded and
+    // cutting power would drop it. Hold instead: the grinding has stopped and
+    // holding current is quiet and safe, whereas a free drop is neither.
+    Serial.println("FAULT: could not seat carriage - HOLDING under power. Power-cycle to reset.");
+  }
+  Serial.flush();
+  while (1);
 }
 
 // =============================================================
@@ -401,6 +574,7 @@ int waitForValue() {
 
 // Non-blocking: if the host has sent the killcode, stop immediately.
 void checkKillSignal() {
+  if (halting) return;   // a halt path is already running; do not re-enter it
   if (Serial.available() > 0) {
     int val = Serial.readString().toInt();
     if (val == KILLCODE) haltOnKill();
@@ -410,7 +584,8 @@ void checkKillSignal() {
 
 // Emergency stop: lights off, motors disabled, halt forever.
 void haltOnKill() {
-  if (ENABLE_LIGHTS) digitalWrite(ledRelayPin, RELAY_OFF);
+  halting = true;   // guard() must not re-enter this or faultHalt() from here
+  lightsOff();
 
   // Graceful shutdown: bring the gantry HOME and seat it on the bottom stop
   // BEFORE cutting motor power, so the non-self-locking vertical belt axis parks
@@ -418,6 +593,10 @@ void haltOnKill() {
   // free-dropping. engageMotors() first in case the kill arrived while the
   // steppers were disabled (handshake, or the idle wait when HOLD_BETWEEN_CYCLES
   // is false); it is a no-op when they were already holding.
+  //
+  // This homing is still bounded by homeTimeoutMs -- that check is inline in
+  // homeToSensors(), not in guard() -- so a kill that arrives while the gantry
+  // is jammed ends in faultHalt()'s safe parking rather than grinding here.
   Serial.println("KILL received - homing before power-off...");
   Serial.flush();
   engageMotors();
