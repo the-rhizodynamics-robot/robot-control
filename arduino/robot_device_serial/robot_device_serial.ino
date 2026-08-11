@@ -80,9 +80,28 @@ const unsigned long START_OFFSET_X_MS = 0;    // [CONFIRM]
 const unsigned long START_OFFSET_Y_MS = 0;    // [CONFIRM]
 const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before stepping
 
+// ---------------- Homing fault detection ---------------------
+// homeToSensors() drives until BOTH flags trigger. If an axis cannot get there
+// -- a jam, an obstruction, a failed or dirty sensor, a snapped belt -- an
+// unbounded wait pulses step into a stalled motor indefinitely: the driver
+// keeps pushing full rated current into a locked rotor, the gantry grinds, and
+// the host cannot intervene because checkKillSignal() is not reachable from
+// inside that loop. Only a power cycle would stop it.
+//
+// The budget is DERIVED from the run geometry (handshake) and this rig's own
+// motion constants rather than hardcoded, so it travels to robots with a
+// different shelf count, box count, or rail length. Worst case is homing from
+// the far corner: full travel of the slower axis, plus the jog calibrate()
+// makes clear of the flags first.
+const unsigned long HOME_JOG_MS           = 5000;  // calibrate()'s pre-homing jog
+const unsigned long HOME_TIMEOUT_FACTOR   = 3;     // margin over worst-case travel
+const unsigned long HOME_TIMEOUT_FLOOR_MS = 60000; // never trip earlier than this
+
 // ---------------- State --------------------------------------
 bool  calibrated      = false;
 float dayElapsedHours = 0;    // position within the 24h light cycle
+unsigned long homeTimeoutMs = 0;  // derived after handshake (see above)
+unsigned long faultLowerMs  = 0;  // budget for the fault-path powered descent
 
 void setup() {
   Serial.begin(9600);
@@ -108,6 +127,23 @@ void setup() {
   if (numShelves > MAX_SHELVES) numShelves = MAX_SHELVES;
   cycleIntervalMs = (unsigned long)cycleIntervalMin * 60000UL;
   dayElapsedHours = startHour;
+
+  // Homing budget, from the geometry just received. homeToSensors() drives BOTH
+  // axes in one loop at the same step rate, so worst-case homing time is the
+  // SLOWER axis's full travel (a max, not a sum), plus calibrate()'s jog clear
+  // of the flags. Shelf 1 sits START_OFFSET_Y_MS above home, so the vertical
+  // span is (numShelves - 1) pitches; likewise (photosPerShelf - 1) horizontally.
+  unsigned long vertTravelMs  = (unsigned long)(numShelves > 1 ? numShelves - 1 : 1)
+                                * MOVE_PER_SHELF_MS + START_OFFSET_Y_MS;
+  unsigned long horizTravelMs = (unsigned long)(photosPerShelf > 1 ? photosPerShelf - 1 : 1)
+                                * MOVE_PER_BOX_MS + START_OFFSET_X_MS;
+  unsigned long worstTravelMs = (vertTravelMs > horizTravelMs ? vertTravelMs : horizTravelMs)
+                                + HOME_JOG_MS;
+  homeTimeoutMs = worstTravelMs * HOME_TIMEOUT_FACTOR;
+  if (homeTimeoutMs < HOME_TIMEOUT_FLOOR_MS) homeTimeoutMs = HOME_TIMEOUT_FLOOR_MS;
+  // The fault path only has to bring the carriage DOWN, so it needs the vertical
+  // span alone -- plus the jog, since calibrate() may have raised it that far.
+  faultLowerMs = vertTravelMs + HOME_JOG_MS;
 
   // ---- Pin setup ----
   pinMode(stepPinX, OUTPUT); pinMode(dirPinX, OUTPUT); pinMode(enblPinX, OUTPUT);
@@ -143,6 +179,8 @@ void setup() {
   Serial.print("Will photograph ");  Serial.print(numShelves);
   Serial.print(" shelves with ");    Serial.print(photosPerShelf);
   Serial.println(" photos each");
+  Serial.print("Homing timeout: ");  Serial.print(homeTimeoutMs / 1000);
+  Serial.println(" s (derived from geometry)");
 }
 
 void loop() {
@@ -296,15 +334,21 @@ void disengageMotors() {
   digitalWrite(enblPinY, HIGH);
 }
 
-// Drive down + left until BOTH photointerrupters trigger (read LOW).
+// Drive down + left until BOTH photointerrupters trigger (read LOW), or until
+// the derived budget expires -- see the homing-fault notes at the top.
 void homeToSensors() {
   digitalWrite(dirPinY, down);
   digitalWrite(dirPinX, left);
 
   bool vTrig = false, hTrig = false;
+  unsigned long t0 = millis();
   while (!vTrig || !hTrig) {
     if (digitalRead(vertSensor)  == LOW) vTrig = true;
     if (digitalRead(horizSensor) == LOW) hTrig = true;
+
+    // Never spin here forever: an obstructed axis would stall against the
+    // obstruction at full current with no way for the host to intervene.
+    if (millis() - t0 > homeTimeoutMs) faultHalt(vTrig, hTrig);   // does not return
 
     if (!vTrig) digitalWrite(stepPinY, HIGH);
     if (!hTrig) digitalWrite(stepPinX, HIGH);
@@ -316,6 +360,57 @@ void homeToSensors() {
 
   digitalWrite(dirPinX, right);
   digitalWrite(dirPinY, up);
+}
+
+// All shelf lights off. Shared by the kill and fault paths.
+void lightsOff() {
+  if (!ENABLE_SHELF_LIGHTS) return;
+  for (int i = 0; i < numShelves; i++) digitalWrite(shelfRelayPins[i], RELAY_OFF);
+}
+
+// Drive the carriage DOWN until the vertical flag triggers or `budgetMs` runs
+// out; true if it reached the stop.
+//
+// Fault path only. The point is to seat a possibly-raised carriage UNDER POWER
+// before cutting current: de-energizing a loaded vertical axis lets it drop,
+// back-driving the motors as generators into the shared supply, which has
+// tripped both drivers on regen over-voltage during bench testing. A controlled
+// descent avoids both that and the mechanical impact.
+bool lowerVerticalToStop(unsigned long budgetMs) {
+  digitalWrite(dirPinY, down);
+  unsigned long t0 = millis();
+  while (millis() - t0 < budgetMs) {
+    if (digitalRead(vertSensor) == LOW) return true;
+    digitalWrite(stepPinY, HIGH);
+    delayMicroseconds(STEP_DELAY_US);
+    digitalWrite(stepPinY, LOW);
+    delayMicroseconds(STEP_DELAY_US);
+  }
+  return digitalRead(vertSensor) == LOW;
+}
+
+// Terminal: homing did not finish within its budget. Stepping has already
+// stopped (the caller left its loop), which ends the stall. Report which axis
+// failed, park the carriage safely, then halt -- a gantry that cannot find home
+// must not keep imaging, and recovery should be a deliberate human power cycle.
+void faultHalt(bool vertHomed, bool horizHomed) {
+  lightsOff();
+  Serial.println("FAULT: homing timed out.");
+  Serial.print("FAULT: vertical ");   Serial.println(vertHomed  ? "reached flag" : "DID NOT REACH FLAG");
+  Serial.print("FAULT: horizontal "); Serial.println(horizHomed ? "reached flag" : "DID NOT REACH FLAG");
+  Serial.flush();
+
+  if (vertHomed || lowerVerticalToStop(faultLowerMs)) {
+    disengageMotors();
+    Serial.println("FAULT: carriage on its stop, motors disabled. Power-cycle to reset.");
+  } else {
+    // Could not seat it, so the vertical axis is stuck somewhere loaded and
+    // cutting power would drop it. Hold instead: the grinding has stopped and
+    // holding current is quiet and safe, whereas a free drop is neither.
+    Serial.println("FAULT: could not seat carriage - HOLDING under power. Power-cycle to reset.");
+  }
+  Serial.flush();
+  while (1);
 }
 
 // =============================================================
@@ -344,11 +439,7 @@ void checkKillSignal() {
 
 // Emergency stop: lights off, motors disabled, halt forever.
 void haltOnKill() {
-  if (ENABLE_SHELF_LIGHTS) {
-    for (int i = 0; i < numShelves; i++) {
-      digitalWrite(shelfRelayPins[i], RELAY_OFF);
-    }
-  }
+  lightsOff();
   digitalWrite(enblPinX, HIGH);  // HIGH = disabled
   digitalWrite(enblPinY, HIGH);
   Serial.println("KILL received - motors disabled, halting.");
