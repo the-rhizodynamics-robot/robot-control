@@ -96,6 +96,28 @@ const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before ste
 const unsigned long VERT_SEAT_MS         = 150;  // ~0.2 cm down into the stops (tuned) [TUNE]
 const unsigned long VERT_CLEAR_MARGIN_MS = 300;  // extra up after sensor clears [TUNE]
 
+// ---------------- Pre-shot settle ----------------------------
+// Wait this long after a move before triggering the camera. takePhoto() fires
+// the trigger the instant moveHorizontal() returns -- POST_SHOT_MS elapses AFTER
+// the pulse, not before it -- so without this every box but the first is
+// photographed with zero settling time. Box 1 is the exception: it already gets
+// LIGHT_SETTLE_MS / LIGHT_WARMUP_MS while the lights come up.
+//
+// 0 = previous behaviour. See concepts/horizontal-jitter.md in the wiki: the
+// measured jitter is far too large for carriage ringing to explain (a 1 kg
+// carriage at 14.75 mm/s carries ~1e-4 J, giving ~4 px of ring against 60-190 px
+// observed), so this is NOT expected to be the fix on its own -- it is the cheap
+// test of whether anything settles at all, and of camera-MOUNT ring, which is
+// angular and needs almost no energy.
+//
+// !! Interacts with the driver's idle-current setting. The DQ542MA drops to half
+// current ~0.4 s after the last step pulse (SW4). Today the shutter fires at FULL
+// current; a settle longer than that moves the exposure into the half-current
+// window, HALVING holding torque exactly when the picture is taken. So either
+// keep this under ~400 ms, or switch SW4 to full current first -- which is the
+// plan being tested (SW4 full + a decisive 1000 ms).
+const unsigned long PRE_SHOT_SETTLE_MS = 1000;
+
 // ---------------- Homing fault detection ---------------------
 // homeToSensors() drives until BOTH flags trigger. If an axis cannot get there
 // -- a jam, an obstruction, a failed or dirty sensor, a snapped belt -- an
@@ -313,6 +335,9 @@ void photographShelf(boolean dir) {
   digitalWrite(dirPinX, dir);
   for (int box = 0; box < photosPerShelf; box++) {
     checkKillSignal();
+    // Let the gantry settle before the shutter. Skipped for box 0, which has just
+    // had LIGHT_SETTLE_MS/LIGHT_WARMUP_MS while the lights came up.
+    if (box > 0 && PRE_SHOT_SETTLE_MS) delay(PRE_SHOT_SETTLE_MS);
     takePhoto();
     if (box < photosPerShelf - 1) {
       moveHorizontal(dir, MOVE_PER_BOX_MS);
