@@ -81,7 +81,10 @@ def load_defaults(toml_path: str | Path = "config.toml") -> dict:
     if not path.exists():
         return merged
     try:
-        import tomllib  # Python 3.11+
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:  # the pyspin-env venv is 3.10 (PySpin's wheel)
+            import tomli as tomllib
         with path.open("rb") as fh:
             data = tomllib.load(fh)
         merged.update({k: v for k, v in data.items() if k in DEFAULTS})

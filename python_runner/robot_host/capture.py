@@ -84,6 +84,10 @@ class CameraCapture:
         self._processor = PySpin.ImageProcessor()
         self._processor.SetColorProcessing(
             PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
+        # PySpin defaults to JPEG quality 75; SpinView's recorder saved at 100, which the
+        # downstream analysis was tuned on.
+        self._jpeg = PySpin.JPEGOption()
+        self._jpeg.quality = 100
 
         self._out_dir.mkdir(parents=True, exist_ok=True)
         self._cam.BeginAcquisition()
@@ -146,7 +150,7 @@ class CameraCapture:
                     continue
                 converted = self._processor.Convert(img, PySpin.PixelFormat_BGR8)
                 path = self._out_dir / f"{self._name_prefix}-{self._count:06d}.jpg"
-                converted.Save(str(path))
+                converted.Save(str(path), self._jpeg)
                 self._count += 1
                 if self._count <= 5 or self._count % 20 == 0:
                     self._log.info("capture: %d images saved (latest %s)",
