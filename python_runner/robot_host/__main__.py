@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from .capture import start_capture
 from .config import load_defaults, make_run_dir, prompt_config
 from .link import RobotLink
 from .monitor import Monitor, RobotStopped
@@ -47,8 +48,19 @@ def main() -> None:
     )
     logger.info("Run output folder: %s", run_dir)
 
-    input(f"\nPoint FlyCap/Spinnaker to save into {cfg.image_dir} and confirm it is "
-          "running, then press Enter to start... ")
+    # Try to run capture ourselves (PySpin). If that isn't available, fall back
+    # to the operator pointing external capture software (SpinView/FlyCap) at
+    # the run folder, exactly as before.
+    capture = None
+    if cfg.use_internal_capture:
+        capture = start_capture(run_dir, logger, user_set=cfg.camera_user_set)
+
+    if capture:
+        input("\nIn-process camera capture is running (frames saved on each "
+              "trigger). Press Enter to start the robot... ")
+    else:
+        input(f"\nPoint FlyCap/Spinnaker to save into {cfg.image_dir} and confirm it is "
+              "running, then press Enter to start... ")
 
     link: RobotLink | None = None
     try:
@@ -74,6 +86,8 @@ def main() -> None:
         if link:
             link.send_kill()
     finally:
+        if capture:
+            capture.stop()
         if link:
             link.close()
         logger.info("Serial closed.")

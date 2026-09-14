@@ -21,6 +21,8 @@ DEFAULTS = {
     "start_hour": 0,
     "image_dir": r"C:\Users\zhu.lab\Desktop\robotic_imaging",
     "kill_margin_min": 2,     # grace added to the cycle interval before a kill
+    "use_internal_capture": True,  # capture via PySpin in-process; falls back to manual if unavailable
+    "camera_user_set": "",    # camera User Set to load at start (e.g. "UserSet1"); "" = leave as-is
 }
 
 # (low, high) inclusive bounds for numeric prompts.
@@ -44,6 +46,8 @@ class Config:
     start_hour: int
     image_dir: str
     kill_margin_min: int
+    use_internal_capture: bool = True
+    camera_user_set: str = ""
 
     @property
     def expected_images_per_cycle(self) -> int:
@@ -77,7 +81,10 @@ def load_defaults(toml_path: str | Path = "config.toml") -> dict:
     if not path.exists():
         return merged
     try:
-        import tomllib  # Python 3.11+
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:  # the pyspin-env venv is 3.10 (PySpin's wheel)
+            import tomli as tomllib
         with path.open("rb") as fh:
             data = tomllib.load(fh)
         merged.update({k: v for k, v in data.items() if k in DEFAULTS})
@@ -152,4 +159,7 @@ def prompt_config(defaults: dict | None = None) -> Config:
         start_hour=start_hour,
         image_dir=image_dir,
         kill_margin_min=kill_margin_min,
+        # Not interactively prompted -- set these in config.toml if needed.
+        use_internal_capture=d["use_internal_capture"],
+        camera_user_set=d["camera_user_set"],
     )
