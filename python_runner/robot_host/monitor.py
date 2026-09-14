@@ -23,9 +23,15 @@ def listdir_nohidden(path: str) -> list[str]:
     return [f for f in os.listdir(path) if not f.startswith(".")]
 
 
+# Count image files only, so run_config.json (or any other non-image file) in the run folder
+# can't skew the per-cycle check. Same extensions file-sorting ingests.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
 def count_images(image_dir: str) -> int:
     try:
-        return len(listdir_nohidden(image_dir))
+        return sum(1 for f in listdir_nohidden(image_dir)
+                   if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS)
     except FileNotFoundError:
         return 0
 

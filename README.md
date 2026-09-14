@@ -117,7 +117,10 @@ early in each interval, right after the photos for that cycle are taken.
   pip install -r python_runner/requirements.txt
   ```
 - The `robot_device_serial.ino` sketch flashed to the Arduino (Arduino IDE).
-- **FlyCap/Spinnaker running** and saving images to the directory you'll configure.
+- **Camera capture:** by default the host captures images itself with PySpin, so run it
+  from the `pyspin-env` venv and keep **SpinView closed**. Only one program can hold the
+  camera. See [Camera capture](#camera-capture). With `use_internal_capture = false`,
+  run FlyCap/Spinnaker yourself and save into the run folder instead.
 - **Close the Arduino IDE Serial Monitor** before running the host — only one program
   can hold the COM port at a time.
 
@@ -137,15 +140,20 @@ early in each interval, right after the photos for that cycle are taken.
 
 ### Run
 
-```bash
+```bat
 cd python_runner
-python -m robot_host
+C:\Users\zhu.lab\pyspin-env\Scripts\python.exe -m robot_host
 ```
 
+(`pyspin-env` is the Python 3.10 venv with PySpin, pyserial and tomli. Plain `python`
+works only for external capture.)
+
 You'll be prompted for the run configuration (press **Enter** to accept each
-`[default]`); defaults come from `config.toml`. After confirming FlyCap/Spinnaker is running,
-the host opens the port, performs the handshake (each value should log `... -> OK`),
-and begins supervising. Output goes to stdout and to `robot_host.log`.
+`[default]`). Defaults come from `config.toml`. With in-process capture the host loads the
+camera User Set, logs the camera settings, arms the camera (`capture: armed on Line0`),
+writes `run_config.json` into the run folder, and asks you to press Enter to start the robot.
+It then opens the port, performs the handshake (each value should log `... -> OK`), and
+begins supervising. Output goes to stdout and to `robot_host.log`.
 
 ### Configuration
 
@@ -160,6 +168,8 @@ Edit `python_runner/config.toml` to change the defaults the prompts start from:
 | `start_hour` | hour into the day cycle at startup |
 | `image_dir` | **base** output directory; the host creates a per-run folder inside it (see below) |
 | `kill_margin_min` | grace added to the interval before a late-`home` kill |
+| `use_internal_capture` | `true`: the host captures via PySpin. `false`: run SpinView/FlyCap yourself (not prompted) |
+| `camera_user_set` | camera User Set loaded at capture start, e.g. `"UserSet1"` (not prompted) |
 
 > TOML note: Windows paths use single-quoted **literal** strings so backslashes are
 > taken verbatim, e.g. `image_dir = 'D:\images\robot4'`.
@@ -174,8 +184,9 @@ creates a fresh per-run folder inside it named:
 ```
 
 (timestamp to the second; the timestamp itself has no underscores). The host prints this
-path and points the watchdog at it — **repoint FlyCap/Spinnaker to save into this new folder each
-run** (it's printed at the "Confirm FlyCap/Spinnaker…" prompt).
+path and points the watchdog at it. With in-process capture the images and
+`run_config.json` go there automatically. With external capture, **repoint FlyCap/Spinnaker
+to save into this new folder each run** (it's printed at the "Point FlyCap/Spinnaker…" prompt).
 
 > ⚠️ **The trailing `_<shelves>_<boxes>` is a contract with downstream processing.** The
 > [file-sorting](https://github.com/the-rhizodynamics-robot/file-sorting) pipeline reads the
@@ -183,6 +194,33 @@ run** (it's printed at the "Confirm FlyCap/Spinnaker…" prompt).
 > `photos_per_shelf`). Keep both counts as the final two underscore-segments, as plain
 > integers, or sorting downstream breaks. Implemented in
 > `robot_host/config.py::make_run_dir()`.
+
+### Camera capture
+
+**In-process (default).** The host opens the camera with PySpin, loads the User Set named
+by `camera_user_set`, arms it on the Arduino's hardware trigger (Line0, rising edge), and
+saves each frame as `robotcap-NNNNNN.jpg` (JPEG quality 100, like SpinView's recorder).
+Capture starts and stops with the run. This replaces SpinView for capture: SpinView's
+recorder leaks ~34 MB per frame and ended every long run at ~3,400 images when Windows ran
+out of memory. The in-process path was bench-tested flat over 300 frames.
+
+**Imaging settings live in the camera, not in git.** Exposure, gain, gamma, white balance
+and crop are stored in a camera User Set (`UserSet1`), which survives power cycles. To change them:
+
+1. Set `use_internal_capture = false` in `config.toml` and start a run. The firmware only
+   turns the lights on during a run, so tune with the run going.
+2. Open SpinView and adjust the settings on the live image.
+3. Save them to the camera: **User Set Control → User Set Selector = UserSet1 → User Set
+   Save**. Keep **User Set Default = UserSet1** so the camera also powers up with them.
+4. Ctrl-C the run, close SpinView, set `use_internal_capture = true`, and start the real run.
+
+**`run_config.json`.** Every run folder gets a visible `run_config.json`, written before the
+robot starts. It holds the run geometry and settings, the host code's git commit and, with
+in-process capture, the camera settings actually in use (model, serial, firmware, crop,
+exposure, gain, gamma, white-balance ratios, trigger, User Set, JPEG quality). The same
+settings are logged to `robot_host.log`. This is the record of what a run used, and the
+first step of the run-config manifest on the roadmap. file-sorting ignores non-image files,
+so it can sit beside the images.
 
 ---
 
@@ -193,7 +231,8 @@ and only reports in. Each cycle the host:
 
 1. **Waits for `home`** within `(cycle_interval_min + kill_margin_min) × 60` seconds.
    No `home` in time → **late report → kill**.
-2. On `home`, **counts new image files** in `image_dir` since the last cycle:
+2. On `home`, **counts new image files** in `image_dir` since the last cycle (image
+   extensions only, so `run_config.json` doesn't count):
    - delta == `num_shelves × photos_per_shelf` → OK.
    - delta == 0 → alert; **two consecutive zero-image cycles → kill** (the
      camera-silently-failing case).

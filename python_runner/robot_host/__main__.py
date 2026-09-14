@@ -11,7 +11,7 @@ import logging
 import sys
 
 from .capture import start_capture
-from .config import load_defaults, make_run_dir, prompt_config
+from .config import load_defaults, make_run_dir, prompt_config, write_run_config
 from .link import RobotLink
 from .monitor import Monitor, RobotStopped
 from .notifier import Notifier
@@ -54,6 +54,14 @@ def main() -> None:
     capture = None
     if cfg.use_internal_capture:
         capture = start_capture(run_dir, logger, user_set=cfg.camera_user_set)
+
+    # Record the run (geometry, settings, host commit, camera settings) in the run folder
+    # before the robot starts.
+    try:
+        manifest = write_run_config(run_dir, cfg, capture.settings if capture else None)
+        logger.info("Run config written: %s", manifest)
+    except OSError as exc:
+        logger.warning("Could not write run_config.json (%s) - continuing", exc)
 
     if capture:
         input("\nIn-process camera capture is running (frames saved on each "

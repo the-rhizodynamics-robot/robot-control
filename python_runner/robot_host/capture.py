@@ -55,6 +55,8 @@ class CameraCapture:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._count = 0
+        self._loaded_user_set: Optional[str] = None
+        self.settings: dict = {}   # camera settings in use, read at start()
 
     @property
     def saved(self) -> int:
@@ -89,6 +91,13 @@ class CameraCapture:
         self._jpeg = PySpin.JPEGOption()
         self._jpeg.quality = 100
 
+        self.settings = self._read_settings()
+        self.settings.update(user_set_loaded=self._loaded_user_set,
+                             jpeg_quality=self._jpeg.quality,
+                             color_processing="HQ_LINEAR")
+        self._log.info("capture: camera settings: %s",
+                       ", ".join(f"{k}={v}" for k, v in self.settings.items()))
+
         self._out_dir.mkdir(parents=True, exist_ok=True)
         self._cam.BeginAcquisition()
 
@@ -113,6 +122,7 @@ class CameraCapture:
                 return
             sel.SetIntValue(entry.GetValue())
             PySpin.CCommandPtr(nodemap.GetNode("UserSetLoad")).Execute()
+            self._loaded_user_set = self._user_set
             self._log.info("capture: loaded user set '%s'", self._user_set)
         except PySpin.SpinnakerException as exc:
             self._log.warning("capture: could not load user set '%s' (%s)",
@@ -130,6 +140,46 @@ class CameraCapture:
         cam.TriggerSource.SetValue(src)
         cam.TriggerActivation.SetValue(PySpin.TriggerActivation_RisingEdge)
         cam.TriggerMode.SetValue(PySpin.TriggerMode_On)
+
+    # Recorded in the log and in each run's run_config.json. The imaging settings live in
+    # the camera's User Set, not in git, so this is the record of what a run actually used.
+    RECORDED_NODES = (
+        "DeviceModelName", "DeviceSerialNumber", "DeviceFirmwareVersion",
+        "PixelFormat", "Width", "Height", "OffsetX", "OffsetY",
+        "ExposureAuto", "ExposureTime", "GainAuto", "Gain",
+        "BalanceWhiteAuto", "GammaEnable", "Gamma", "BlackLevel",
+        "TriggerSelector", "TriggerSource", "TriggerActivation", "TriggerMode",
+        "UserSetDefault",
+    )
+
+    def _read_settings(self) -> dict:
+        """Current camera settings as strings; nodes this camera lacks are skipped."""
+        PySpin = self._spin
+        nodemap = self._cam.GetNodeMap()
+        out = {}
+        for name in self.RECORDED_NODES:
+            node = nodemap.GetNode(name)
+            try:
+                if node is not None and PySpin.IsAvailable(node) and PySpin.IsReadable(node):
+                    out[name] = PySpin.CValuePtr(node).ToString()
+            except PySpin.SpinnakerException:
+                pass
+        # White balance is one ratio per colour channel, behind a selector; read both and put
+        # the selector back.
+        try:
+            sel = PySpin.CEnumerationPtr(nodemap.GetNode("BalanceRatioSelector"))
+            ratio = PySpin.CFloatPtr(nodemap.GetNode("BalanceRatio"))
+            if PySpin.IsWritable(sel) and PySpin.IsReadable(ratio):
+                original = sel.GetIntValue()
+                for ch in ("Red", "Blue"):
+                    entry = sel.GetEntryByName(ch)
+                    if entry is not None and PySpin.IsReadable(entry):
+                        sel.SetIntValue(entry.GetValue())
+                        out[f"BalanceRatio{ch}"] = f"{ratio.GetValue():.5g}"
+                sel.SetIntValue(original)
+        except PySpin.SpinnakerException:
+            pass
+        return out
 
     # -- capture loop -------------------------------------------------------
     def _run(self) -> None:

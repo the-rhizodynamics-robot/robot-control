@@ -6,6 +6,8 @@ brackets; pressing Enter accepts the default. Numeric values are bounds-checked
 """
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +111,55 @@ def make_run_dir(base: str | Path, num_shelves: int, boxes_per_shelf: int) -> Pa
     run_dir = Path(base) / f"{timestamp}_{num_shelves}_{boxes_per_shelf}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+# Visible (not a dotfile) so it survives the zip -> transfer -> unzip step.
+RUN_CONFIG_NAME = "run_config.json"
+
+
+def _host_code_version() -> dict:
+    """Git commit of the host code that ran; {} if git isn't available."""
+    here = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        r = subprocess.run(["git", *args], cwd=here, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    try:
+        status = git("status", "--porcelain")
+        return {"commit": git("rev-parse", "HEAD"),
+                "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+                "uncommitted_changes": None if status is None else bool(status)}
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+def write_run_config(run_dir: str | Path, cfg: Config, camera: dict | None) -> Path:
+    """Write run_config.json into the run folder: the run-config manifest (see roadmap).
+
+    Records the imaging geometry (which otherwise survives only in the folder name), the
+    other run settings, the host code version and, with in-process capture, the camera
+    settings in use. `camera` is None when external software (SpinView) owns the camera.
+    """
+    data = {
+        "manifest_version": 1,
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "run_folder": Path(run_dir).name,
+        "num_shelves": cfg.num_shelves,
+        "photos_per_shelf": cfg.photos_per_shelf,
+        "cycle_interval_min": cfg.cycle_interval_min,
+        "day_hours": cfg.day_hours,
+        "start_hour": cfg.start_hour,
+        "kill_margin_min": cfg.kill_margin_min,
+        "com_port": cfg.com_port,
+        "capture": {"mode": "in-process (PySpin)" if camera is not None
+                            else "external (SpinView/FlyCap)",
+                    "camera": camera},
+        "host_code": _host_code_version(),
+    }
+    path = Path(run_dir) / RUN_CONFIG_NAME
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def _prompt_int(name: str, default: int, lo: int, hi: int) -> int:
