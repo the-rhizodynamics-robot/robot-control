@@ -23,7 +23,7 @@ DEFAULTS = {
     "start_hour": 0,
     "image_dir": r"C:\Users\zhu.lab\Desktop\robotic_imaging",
     "kill_margin_min": 2,     # grace added to the cycle interval before a kill
-    "use_internal_capture": True,  # capture via PySpin in-process; falls back to manual if unavailable
+    "use_internal_capture": True,  # capture via PySpin in-process; the host refuses to start if it can't
     "camera_user_set": "",    # camera User Set to load at start (e.g. "UserSet1"); "" = leave as-is
 }
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from .capture import start_capture
+from .capture import CaptureUnavailable, start_capture
 from .config import load_defaults, make_run_dir, prompt_config, write_run_config
 from .link import RobotLink
 from .monitor import Monitor, RobotStopped
@@ -48,12 +48,22 @@ def main() -> None:
     )
     logger.info("Run output folder: %s", run_dir)
 
-    # Try to run capture ourselves (PySpin). If that isn't available, fall back
-    # to the operator pointing external capture software (SpinView/FlyCap) at
-    # the run folder, exactly as before.
+    # In-process capture (PySpin) is all-or-nothing: if it can't run as configured,
+    # refuse to start rather than run on the wrong camera settings or fall back to
+    # SpinView. use_internal_capture = false selects external capture on purpose.
     capture = None
     if cfg.use_internal_capture:
-        capture = start_capture(run_dir, logger, user_set=cfg.camera_user_set)
+        try:
+            capture = start_capture(run_dir, logger, user_set=cfg.camera_user_set)
+        except CaptureUnavailable as exc:
+            logger.error("REFUSING TO START: %s", exc)
+            logger.error("Fix that and start again (or set use_internal_capture = false "
+                         "in config.toml to capture with SpinView). The robot was not started.")
+            try:
+                run_dir.rmdir()   # only succeeds if still empty
+            except OSError:
+                pass
+            sys.exit(1)
 
     # Record the run (geometry, settings, host commit, camera settings) in the run folder
     # before the robot starts.

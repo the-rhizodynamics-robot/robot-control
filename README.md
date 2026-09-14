@@ -204,6 +204,12 @@ Capture starts and stops with the run. This replaces SpinView for capture: SpinV
 recorder leaks ~34 MB per frame and ended every long run at ~3,400 images when Windows ran
 out of memory. The in-process path was bench-tested flat over 300 frames.
 
+**The host refuses to start, before the robot moves, if in-process capture can't run as
+configured:** SpinView is open, PySpin or the camera is missing, or the User Set won't load.
+It logs `REFUSING TO START: <reason>`, removes the empty run folder and exits. It never
+falls back to SpinView on its own. To capture with SpinView deliberately, set
+`use_internal_capture = false`.
+
 **Imaging settings live in the camera, not in git.** Exposure, gain, gamma, white balance
 and crop are stored in a camera User Set (`UserSet1`), which survives power cycles. To change them:
 

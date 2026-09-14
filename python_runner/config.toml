@@ -12,8 +12,9 @@ image_dir = 'C:\Users\zhu.lab\Desktop\robotic_imaging'
 kill_margin_min = 2       # grace added to the cycle interval before a kill
 
 # In-process camera capture (PySpin). If true, the host grabs each hardware-
-# triggered frame and saves a JPG into the run folder itself; if PySpin or a
-# camera isn't available it falls back to the manual "point SpinView here"
-# prompt. Requires running the host from an env that has PySpin + pyserial.
+# triggered frame and saves a JPG into the run folder itself. If that can't run
+# as configured (SpinView open, PySpin or camera missing, User Set won't load),
+# the host refuses to start. Run it from pyspin-env (PySpin + pyserial + tomli).
+# Set false to capture with SpinView/FlyCap deliberately.
 use_internal_capture = true
-camera_user_set = "UserSet1"  # camera User Set the runner loads at start ("" = leave as-is)
+camera_user_set = "UserSet1"  # camera User Set loaded at start; a failed load refuses the run ("" = leave as-is)

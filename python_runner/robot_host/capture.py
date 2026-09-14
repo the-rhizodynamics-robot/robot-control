@@ -7,10 +7,12 @@ saves each triggered frame as a JPG into the run folder. Capture therefore
 starts and stops WITH the run, and every save is logged -- so there is no
 Record-dialog state, buffer policy, or silent self-stop to babysit.
 
-Fail-soft by design: if PySpin isn't importable or no camera is found,
-``start_capture()`` returns ``None`` and the caller falls back to the manual
-"point your capture software here" prompt -- the SpinView workflow is unchanged
-on machines without PySpin.
+Strict by design: if in-process capture can't run exactly as configured (SpinView
+is open, PySpin or the camera is missing, the User Set won't load),
+``start_capture()`` raises ``CaptureUnavailable`` and the host refuses to start
+the run. A run on the wrong settings, or falling back to SpinView and its memory
+leak, is worse than no run. To capture with SpinView deliberately, set
+``use_internal_capture = false``.
 
 To USE integrated capture, run the host from an environment that has BOTH
 pyserial and PySpin (e.g. the pyspin-env venv with `pip install pyserial`),
@@ -18,14 +20,27 @@ with the 64-bit Spinnaker CTI env vars set (see the Spinnaker 64-bit setup).
 """
 from __future__ import annotations
 
+import csv
 import logging
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
 
 
 class CaptureUnavailable(Exception):
-    """PySpin is missing or no camera is present; caller should fall back."""
+    """In-process capture can't run as configured; the host refuses to start."""
+
+
+def spinview_running() -> list[str]:
+    """SpinView processes currently running, as 'name (pid N)'. [] if none, or not on Windows."""
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [f"{row[0]} (pid {row[1]})" for row in csv.reader(out.splitlines())
+            if len(row) >= 2 and "spinview" in row[0].lower()]
 
 
 class CameraCapture:
@@ -64,42 +79,51 @@ class CameraCapture:
 
     # -- setup --------------------------------------------------------------
     def start(self) -> None:
+        # Checked first, before touching the camera: with SpinView holding it, the User Set
+        # load is refused and the run would go ahead on whatever settings SpinView left.
+        running = spinview_running()
+        if running:
+            raise CaptureUnavailable(
+                f"SpinView is open: {', '.join(running)}. Close it first; only one "
+                "program can hold the camera")
         try:
-            import PySpin  # lazy: absence => fall back, not a crash
+            import PySpin  # lazy, so a missing PySpin is a clear refusal, not an ImportError
         except ImportError as exc:
-            raise CaptureUnavailable(f"PySpin not importable ({exc})") from exc
+            raise CaptureUnavailable(
+                f"PySpin not importable ({exc}); run the host from pyspin-env") from exc
         self._spin = PySpin
 
-        self._system = PySpin.System.GetInstance()
-        self._cam_list = self._system.GetCameras()
-        if self._cam_list.GetSize() == 0:
-            self._cam_list.Clear()
-            self._system.ReleaseInstance()
-            self._system = self._cam_list = None
-            raise CaptureUnavailable("no camera detected")
+        try:
+            self._system = PySpin.System.GetInstance()
+            self._cam_list = self._system.GetCameras()
+            if self._cam_list.GetSize() == 0:
+                raise CaptureUnavailable("no camera detected")
 
-        self._cam = self._cam_list.GetByIndex(0)
-        self._cam.Init()
-        self._apply_user_set()
-        self._configure_trigger()
+            self._cam = self._cam_list.GetByIndex(0)
+            self._cam.Init()
+            self._apply_user_set()
+            self._configure_trigger()
 
-        self._processor = PySpin.ImageProcessor()
-        self._processor.SetColorProcessing(
-            PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
-        # PySpin defaults to JPEG quality 75; SpinView's recorder saved at 100, which the
-        # downstream analysis was tuned on.
-        self._jpeg = PySpin.JPEGOption()
-        self._jpeg.quality = 100
+            self._processor = PySpin.ImageProcessor()
+            self._processor.SetColorProcessing(
+                PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
+            # PySpin defaults to JPEG quality 75; SpinView's recorder saved at 100, which
+            # the downstream analysis was tuned on.
+            self._jpeg = PySpin.JPEGOption()
+            self._jpeg.quality = 100
 
-        self.settings = self._read_settings()
-        self.settings.update(user_set_loaded=self._loaded_user_set,
-                             jpeg_quality=self._jpeg.quality,
-                             color_processing="HQ_LINEAR")
-        self._log.info("capture: camera settings: %s",
-                       ", ".join(f"{k}={v}" for k, v in self.settings.items()))
+            self.settings = self._read_settings()
+            self.settings.update(user_set_loaded=self._loaded_user_set,
+                                 jpeg_quality=self._jpeg.quality,
+                                 color_processing="HQ_LINEAR")
+            self._log.info("capture: camera settings: %s",
+                           ", ".join(f"{k}={v}" for k, v in self.settings.items()))
 
-        self._out_dir.mkdir(parents=True, exist_ok=True)
-        self._cam.BeginAcquisition()
+            self._out_dir.mkdir(parents=True, exist_ok=True)
+            self._cam.BeginAcquisition()
+        except Exception:
+            self._teardown()   # release the camera so the next attempt can open it
+            raise
 
         self._thread = threading.Thread(target=self._run, name="camera-capture",
                                         daemon=True)
@@ -117,16 +141,17 @@ class CameraCapture:
             sel = PySpin.CEnumerationPtr(nodemap.GetNode("UserSetSelector"))
             entry = sel.GetEntryByName(self._user_set)
             if entry is None:
-                self._log.warning("capture: user set '%s' not found; leaving current settings",
-                                  self._user_set)
-                return
+                raise CaptureUnavailable(
+                    f"camera has no user set '{self._user_set}' (check camera_user_set "
+                    "in config.toml)")
             sel.SetIntValue(entry.GetValue())
             PySpin.CCommandPtr(nodemap.GetNode("UserSetLoad")).Execute()
             self._loaded_user_set = self._user_set
             self._log.info("capture: loaded user set '%s'", self._user_set)
         except PySpin.SpinnakerException as exc:
-            self._log.warning("capture: could not load user set '%s' (%s)",
-                              self._user_set, exc)
+            raise CaptureUnavailable(
+                f"could not load user set '{self._user_set}' ({exc}). Is another program "
+                "using the camera?") from exc
 
     def _configure_trigger(self) -> None:
         """Hardware trigger: FrameStart on the trigger line, rising edge."""
@@ -216,6 +241,11 @@ class CameraCapture:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self._grab_timeout_ms / 1000.0 + 2.0)
+        self._teardown()
+        self._log.info("capture: stopped, %d images saved", self._count)
+
+    def _teardown(self) -> None:
+        """Release the camera and the Spinnaker system. Safe on a half-started capture."""
         PySpin = self._spin
         try:
             if self._cam is not None:
@@ -238,26 +268,20 @@ class CameraCapture:
             except Exception:
                 pass
             self._cam_list = self._system = None
-            self._log.info("capture: stopped, %d images saved", self._count)
 
 
 def start_capture(out_dir, logger: logging.Logger, user_set: str = "",
-                  trigger_source: str = "Line0") -> Optional[CameraCapture]:
-    """Try to start in-process capture; return the handle, or None to fall back.
+                  trigger_source: str = "Line0") -> CameraCapture:
+    """Start in-process capture and return the handle.
 
-    Never raises: any failure (no PySpin, no camera, config error) is logged and
-    returns None so the caller can use the manual capture-software prompt.
+    Raises CaptureUnavailable, saying why, if it can't run as configured. The caller
+    refuses to start the run.
     """
+    cap = CameraCapture(out_dir, logger, user_set=user_set, trigger_source=trigger_source)
     try:
-        cap = CameraCapture(out_dir, logger, user_set=user_set,
-                            trigger_source=trigger_source)
         cap.start()
-        return cap
-    except CaptureUnavailable as exc:
-        logger.warning("In-process capture unavailable (%s) - "
-                       "falling back to manual capture software.", exc)
-        return None
-    except Exception as exc:  # noqa: BLE001 - never let capture setup kill the run
-        logger.warning("In-process capture failed to start (%s) - "
-                       "falling back to manual capture software.", exc)
-        return None
+    except CaptureUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any camera setup error means no run
+        raise CaptureUnavailable(f"camera setup failed ({exc})") from exc
+    return cap
