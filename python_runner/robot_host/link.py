@@ -4,6 +4,9 @@ Protocol (must match the firmware):
   - handshake: host sends each config value as ASCII text; firmware echoes
     the parsed int back (newline-terminated) for verification.
   - report:    firmware prints "home" once per completed cycle.
+  - ack:       host answers each "home" with HOST_ACK ("4096"). The firmware
+               parks itself and halts if these stop arriving (dead-man), so a
+               crashed or rebooted host no longer leaves the robot cycling.
   - kill:      host sends KILLCODE ("2048") at any time to stop the robot.
 Link: 9600 baud, firmware uses Serial.setTimeout(2).
 """
@@ -15,6 +18,7 @@ from typing import Callable, Optional
 import serial
 
 KILLCODE = "2048"
+HOST_ACK = "4096"
 BAUD = 9600
 HOME_TOKEN = "home"
 
@@ -73,6 +77,20 @@ class RobotLink:
             if on_status:
                 on_status(f"robot: {line}")
         return False
+
+    def send_ack(self) -> None:
+        """Answer a completed cycle: 'the host is still here'.
+
+        Feeds the firmware's dead-man watchdog, which arms on the first ack and
+        halts the robot if two intervals pass without one. Best-effort: a failed
+        write must not end an otherwise healthy run, and one missed ack is
+        within the firmware's tolerance.
+        """
+        try:
+            self.ser.write(HOST_ACK.encode())
+            self.ser.flush()
+        except Exception:
+            pass
 
     def send_kill(self) -> None:
         self.ser.write(KILLCODE.encode())

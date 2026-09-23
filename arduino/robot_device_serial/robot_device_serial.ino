@@ -9,7 +9,11 @@
 //      firmware reads (and echoes back for verification) instead of
 //      using hardcoded constants;
 //    - "home" REPORT: the firmware prints "home" once per completed
-//      cycle so the host watchdog knows it is alive; 
+//      cycle so the host watchdog knows it is alive;
+//    - ACK / DEAD-MAN: the host answers each "home" with HOST_ACK
+//      (4096). If those stop arriving the firmware parks itself and
+//      halts -- see hostLostHalt(). Until the first ack the watchdog
+//      stays disarmed, so an older host that never acks still works;
 //    - KILL: at any time the host may send KILLCODE (2048) to stop
 //      the robot immediately.
 //
@@ -24,10 +28,28 @@
 //    4. day_hours        (light hours per 24h; 24 = constant light)
 //    5. start_hour       (hour into the current day cycle)
 //    6. start signal     (any non-kill value, e.g. 1)
+//  Then once per cycle, after the firmware prints "home":
+//    7. HOST_ACK (4096)  -- the host is still alive
 //  Link: 9600 baud, Serial.setTimeout(2).
 // =============================================================
 
 const int KILLCODE = 2048;   // must match the host program
+const int HOST_ACK = 4096;   // must match the host program
+
+// ---------------- Host dead-man watchdog ---------------------
+// The host supervises the firmware (no "home" in time -> it sends KILLCODE), but
+// nothing watched the HOST: during a healthy run it only listens, so silence is
+// indistinguishable from a dead host. A rebooted PC therefore left the robot
+// cycling indefinitely (observed 2026-09-19..23: a Windows update restarted the
+// host mid-run and the gantry kept sweeping for days, triggering a camera nobody
+// was recording).
+//
+// Fix: the host now answers every "home" with HOST_ACK. If two intervals pass
+// with no ack the firmware parks itself. The check runs ONLY in the idle wait,
+// where the carriage is already home and seated -- the safest possible moment to
+// stop. Disarmed until the first ack arrives, so an older host still works.
+const bool HOST_WATCHDOG = true;
+const unsigned long HOST_TIMEOUT_MARGIN_MS = 60000UL;  // slack on top of 2 intervals
 
 // ---------------- Run configuration (set by handshake) -------
 // Defaults below are only placeholders; the host overwrites them.
@@ -185,6 +207,9 @@ unsigned long workStartMs   = 0;  // when this cycle's work began
 bool  workTimingActive      = false; // false during the idle wait (no deadline)
 unsigned int  guardCounter  = 0;  // step counter for guard()'s duty cycle
 bool  halting               = false; // set once a halt path starts; stops re-entry
+unsigned long lastHostContactMs = 0;     // millis() of the last HOST_ACK
+unsigned long hostTimeoutMs     = 0;     // derived from cycleIntervalMs in setup()
+bool  hostWatchdogArmed     = false; // set by the first ack; see HOST_WATCHDOG
 
 void setup() {
   Serial.begin(9600);
@@ -227,6 +252,11 @@ void setup() {
   // The fault path only has to bring the carriage DOWN, so it needs the vertical
   // span alone -- plus the jog, since calibrate() may have raised it that far.
   faultLowerMs = vertTravelMs + HOME_JOG_MS;
+
+  // Two whole intervals plus slack: one missed ack is survivable (a busy host, a
+  // dropped byte), two in a row means the host is gone.
+  hostTimeoutMs     = 2UL * cycleIntervalMs + HOST_TIMEOUT_MARGIN_MS;
+  lastHostContactMs = millis();   // the handshake itself counts as contact
 
   // ---- Pin setup ----
   pinMode(stepPinX, OUTPUT); pinMode(dirPinX, OUTPUT); pinMode(enblPinX, OUTPUT);
@@ -352,6 +382,12 @@ void loop() {
   Serial.println("Cycle complete. Waiting for next interval...");
   while (millis() - cycleStart < cycleIntervalMs) {
     checkKillSignal();
+    // Dead-man check, here and nowhere else: the carriage is home and seated, so
+    // parking from this point is drop-free. Subtraction is rollover-safe.
+    if (HOST_WATCHDOG && hostWatchdogArmed &&
+        (millis() - lastHostContactMs) > hostTimeoutMs) {
+      hostLostHalt();   // does not return
+    }
     delay(200);
   }
 }
@@ -603,6 +639,10 @@ void checkKillSignal() {
   if (Serial.available() > 0) {
     int val = Serial.readString().toInt();
     if (val == KILLCODE) haltOnKill();
+    else if (val == HOST_ACK) {
+      lastHostContactMs = millis();
+      hostWatchdogArmed = true;   // only a real ack arms the dead-man
+    }
     // any other stray input is ignored
   }
 }
@@ -629,6 +669,25 @@ void haltOnKill() {
 
   disengageMotors();  // now safe -- resting on the stop
   Serial.println("Homed, motors disabled, halting.");
+  Serial.flush();
+  while (1);
+}
+
+// Host dead-man expired: the supervising host has gone (crash, reboot, closed
+// terminal). Park exactly as haltOnKill() does -- home, seat on the bottom stop,
+// THEN cut motor current -- but deliberately LEAVE THE LIGHTS AS THEY ARE.
+// An operator-issued kill means someone is present and the rig is being shut
+// down; this halt is unattended and the chamber may hold live plants, so cutting
+// the only LED channel could leave them dark for days. Motion stops; light does
+// not change.
+void hostLostHalt() {
+  halting = true;   // guard() must not re-enter this or faultHalt() from here
+  Serial.println("HOST TIMEOUT - no ack from the host; homing before power-off...");
+  Serial.flush();
+  engageMotors();
+  homeToSensors();    // bounded by homeTimeoutMs; falls through to faultHalt() if jammed
+  disengageMotors();  // safe -- resting on the stop
+  Serial.println("Homed, motors disabled, halting. Lights left unchanged.");
   Serial.flush();
   while (1);
 }

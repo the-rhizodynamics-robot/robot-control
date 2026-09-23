@@ -57,7 +57,7 @@ python_runner/
   robot_host/                              # the host program (run as: python -m robot_host)
     __main__.py                            # entry: prompt config -> handshake -> supervise
     config.py                              # defaults, bounds, interactive prompts, derived values
-    link.py                                # serial open, handshake, home heartbeat, kill
+    link.py                                # serial open, handshake, home heartbeat, ack, kill
     monitor.py                             # watchdog loop + image-count validation + kill decision
     notifier.py                            # alerts (log-only now; email is the final phase)
   config.toml                              # editable persistent defaults for the prompts
@@ -96,7 +96,34 @@ Both sides must agree on this exactly; changing one side without the other fails
 - **Heartbeat:** the firmware prints a line that is exactly `home` once per completed
   cycle. (It also prints chatty status lines containing the word "home" — the host
   matches the heartbeat **exactly**, not as a substring.)
+- **Ack / dead-man:** the host answers every `home` with `4096` (`HOST_ACK`). If **two
+  whole intervals plus 60 s** pass with no ack, the firmware assumes the host is gone,
+  parks itself and halts — see [Host dead-man watchdog](#host-dead-man-watchdog).
 - **Kill:** the host sends `2048` (`KILLCODE`) at any time; the firmware stops.
+
+### Host dead-man watchdog
+
+The supervision used to run one way only: the host killed the robot if `home` stopped
+arriving, but nothing watched the **host**. During a healthy run the host only listens, so
+silence was indistinguishable from a dead host, and a crashed or rebooted PC left the robot
+**cycling indefinitely** — observed 2026-09-19..23, when a Windows update restarted the host
+mid-run and the gantry kept sweeping for days, triggering a camera nobody was recording.
+Closing the host terminal with the X had always done the same thing.
+
+Now the host answers each `home` with `HOST_ACK`, and the firmware halts if those stop.
+
+- **Where it fires:** only in the **idle wait** between cycles, where the carriage is
+  already home and seated on its bottom stop. Parking from there is drop-free — the
+  vertical belt axis is not self-locking, so cutting current mid-travel would let it fall.
+- **How it parks:** identical to the kill path — home, seat, *then* de-energize.
+- **The lights are deliberately left alone.** A kill means an operator is present and
+  shutting the rig down, so it cuts the lights; this halt is unattended and the chamber may
+  hold live plants, so it changes motion only. (A halted robot started by an *operator*
+  kill **does** go dark — worth knowing before stopping a rig with plants in it.)
+- **Backward compatible:** the watchdog stays disarmed until the first ack arrives, so an
+  older host that never acks behaves exactly as before.
+- **Tuning:** `HOST_WATCHDOG` (on/off) and `HOST_TIMEOUT_MARGIN_MS` in the firmware. One
+  missed ack is survivable by design; two in a row is the trigger.
 
 ### Timing model
 
@@ -252,11 +279,20 @@ A periodic heartbeat ("Robot alive: N cycles…") is logged every few cycles.
   before closing the port, and the firmware halts (lights off, motors disabled).
 - **Watchdog stop:** the host sends the same killcode automatically on a late `home`
   or two zero-image cycles.
+- **Dead-man stop:** if the host dies without sending the killcode (crash, reboot, closed
+  terminal), the firmware notices the missing acks and parks itself after ~two intervals —
+  see [Host dead-man watchdog](#host-dead-man-watchdog). It leaves the lights as they were.
 - **Emergency stop:** the Arduino **reset button** (or pulling power) — instant, and
-  independent of serial.
+  independent of serial. ⚠️ **Time it.** Reset de-energizes the steppers immediately, and
+  the vertical belt axis is not self-locking: if the gantry is **raised** mid-cycle it will
+  free-drop and can throw a regen over-voltage alarm on the drivers. Press it while the
+  carriage is **parked at home and still** (the idle wait — at 15-minute cycles that's
+  ~85–90 % of the time). After a reset the firmware de-energizes, kills the lights and
+  blocks waiting for a handshake, so it cannot restart on its own.
 - ⚠️ **Do not** close the terminal window with the X or hard-kill the process. That
-  skips the killcode, and the robot keeps cycling on its own (it doesn't need the host
-  to continue). Note also that the firmware only checks for the killcode at safe points
+  skips the killcode. The robot does not need the host to continue, so it keeps cycling
+  until the dead-man watchdog parks it ~two intervals later — and on firmware older than
+  that watchdog, indefinitely. Note also that the firmware only checks for the killcode at safe points
   (between boxes, between shelves, during the inter-cycle wait), so a kill lands at the
   next checkpoint, not mid-move.
 

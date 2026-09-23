@@ -73,6 +73,11 @@ class Monitor:
                     f"margin {self.cfg.kill_margin_min} min)"
                 )
 
+            # Feed the firmware's dead-man watchdog before anything that could
+            # fail below, so a crash in the counting/alerting path still reads as
+            # "host alive" for this cycle rather than silently arming a halt.
+            self.link.send_ack()
+
             cycle += 1
             now_count = count_images(self.cfg.image_dir)
             delta = now_count - prev_count
