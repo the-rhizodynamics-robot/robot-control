@@ -24,6 +24,7 @@ import csv
 import logging
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -53,7 +54,7 @@ class CameraCapture:
     """
 
     def __init__(self, out_dir, logger: logging.Logger, user_set: str = "",
-                 trigger_source: str = "Line0", grab_timeout_ms: int = 5000,
+                 trigger_source: str = "Line0", grab_timeout_ms: int = 1000,
                  name_prefix: str = "robotcap"):
         self._out_dir = Path(out_dir)
         self._log = logger
@@ -70,6 +71,7 @@ class CameraCapture:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._count = 0
+        self._acquiring = False
         self._loaded_user_set: Optional[str] = None
         self.settings: dict = {}   # camera settings in use, read at start()
 
@@ -95,14 +97,24 @@ class CameraCapture:
 
         try:
             self._system = PySpin.System.GetInstance()
-            self._cam_list = self._system.GetCameras()
-            if self._cam_list.GetSize() == 0:
-                raise CaptureUnavailable("no camera detected")
-
-            self._cam = self._cam_list.GetByIndex(0)
-            self._cam.Init()
-            self._apply_user_set()
-            self._configure_trigger()
+            self._open_camera()
+            try:
+                self._prepare_camera()
+            except PySpin.SpinnakerException as exc:
+                # Usually a camera still acquiring from a run that didn't shut down cleanly
+                # (window closed, crash, PC rebooted with the USB port powered). It refuses
+                # User Set loads and acquisition settings until power-cycled, so reset it in
+                # software -- the equivalent of unplugging it -- and try once more.
+                self._log.warning("capture: camera refused setup (%s); resetting it and "
+                                  "retrying", exc)
+                self._reset_camera()
+                try:
+                    self._prepare_camera()
+                except PySpin.SpinnakerException as exc2:
+                    raise CaptureUnavailable(
+                        f"camera refused setup even after a reset ({exc2}). Is another "
+                        "program using the camera? If not, unplug and replug its USB "
+                        "cable") from exc2
 
             self._processor = PySpin.ImageProcessor()
             self._processor.SetColorProcessing(
@@ -121,6 +133,7 @@ class CameraCapture:
 
             self._out_dir.mkdir(parents=True, exist_ok=True)
             self._cam.BeginAcquisition()
+            self._acquiring = True
         except Exception:
             self._teardown()   # release the camera so the next attempt can open it
             raise
@@ -131,27 +144,96 @@ class CameraCapture:
         self._log.info("capture: armed on %s (rising edge), saving JPGs to %s",
                        self._trigger_source, self._out_dir)
 
+    def _open_camera(self) -> None:
+        """Find the (single) camera, Init it, and stop any acquisition left running."""
+        self._cam_list = self._system.GetCameras()
+        if self._cam_list.GetSize() == 0:
+            raise CaptureUnavailable("no camera detected")
+        cam = self._cam_list.GetByIndex(0)
+        try:
+            cam.Init()
+        except Exception:
+            del cam   # Spinnaker won't release the system while a camera reference lives
+            raise
+        self._cam = cam
+        self._stop_stale_acquisition()
+
+    def _node(self, nodemap, name: str, ptr_type):
+        """`name` as a `ptr_type` pointer, or None if this camera lacks it."""
+        node = nodemap.GetNode(name)
+        if node is None:
+            return None
+        ptr = ptr_type(node)
+        return ptr if self._spin.IsAvailable(ptr) else None
+
+    def _stop_stale_acquisition(self) -> None:
+        """Stop acquisition a previous, uncleanly ended run may have left running.
+
+        A fresh Init() doesn't stop it, and while it runs the camera refuses User Set loads
+        and acquisition settings. Best effort and harmless on an idle camera; if it doesn't
+        clear the camera, start() falls back to a reset.
+        """
+        PySpin = self._spin
+        nodemap = self._cam.GetNodeMap()
+        try:
+            stop = self._node(nodemap, "AcquisitionStop", PySpin.CCommandPtr)
+            if stop is not None and PySpin.IsWritable(stop):
+                stop.Execute()
+            locked = self._node(nodemap, "TLParamsLocked", PySpin.CIntegerPtr)
+            if locked is not None and PySpin.IsWritable(locked) and locked.GetValue() != 0:
+                locked.SetValue(0)
+        except PySpin.SpinnakerException as exc:
+            self._log.debug("capture: clearing stale acquisition: %s", exc)
+
+    def _prepare_camera(self) -> None:
+        self._apply_user_set()
+        self._configure_trigger()
+
+    def _reset_camera(self, timeout_s: float = 30.0) -> None:
+        """Reboot the camera (DeviceReset) and reopen it: unplugging it, in software."""
+        PySpin = self._spin
+        reset = self._node(self._cam.GetNodeMap(), "DeviceReset", PySpin.CCommandPtr)
+        if reset is None or not PySpin.IsWritable(reset):
+            raise CaptureUnavailable(
+                "camera refused setup and can't be reset in software. Is another program "
+                "using the camera? If not, unplug and replug its USB cable")
+        reset.Execute()
+        del reset
+        self._release_camera(quiet=True)   # the old handle is dead once the camera reboots
+        time.sleep(5)                      # let it drop off the bus before looking again
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                self._open_camera()
+                self._log.info("capture: camera back after reset")
+                return
+            except (CaptureUnavailable, PySpin.SpinnakerException) as exc:
+                self._release_camera(quiet=True)
+                if time.monotonic() > deadline:
+                    raise CaptureUnavailable(
+                        f"camera did not come back within {timeout_s:.0f} s of a reset "
+                        f"({exc}); unplug and replug its USB cable") from exc
+                time.sleep(1)
+
     def _apply_user_set(self) -> None:
-        """Load a camera User Set (e.g. one tuned + saved in SpinView), if named."""
+        """Load a camera User Set (e.g. one tuned + saved in SpinView), if named.
+
+        A refused load raises SpinnakerException, which start() answers with a reset.
+        """
         if not self._user_set:
             return
         PySpin = self._spin
-        try:
-            nodemap = self._cam.GetNodeMap()
-            sel = PySpin.CEnumerationPtr(nodemap.GetNode("UserSetSelector"))
-            entry = sel.GetEntryByName(self._user_set)
-            if entry is None:
-                raise CaptureUnavailable(
-                    f"camera has no user set '{self._user_set}' (check camera_user_set "
-                    "in config.toml)")
-            sel.SetIntValue(entry.GetValue())
-            PySpin.CCommandPtr(nodemap.GetNode("UserSetLoad")).Execute()
-            self._loaded_user_set = self._user_set
-            self._log.info("capture: loaded user set '%s'", self._user_set)
-        except PySpin.SpinnakerException as exc:
+        nodemap = self._cam.GetNodeMap()
+        sel = PySpin.CEnumerationPtr(nodemap.GetNode("UserSetSelector"))
+        entry = sel.GetEntryByName(self._user_set)
+        if entry is None:
             raise CaptureUnavailable(
-                f"could not load user set '{self._user_set}' ({exc}). Is another program "
-                "using the camera?") from exc
+                f"camera has no user set '{self._user_set}' (check camera_user_set "
+                "in config.toml)")
+        sel.SetIntValue(entry.GetValue())
+        PySpin.CCommandPtr(nodemap.GetNode("UserSetLoad")).Execute()
+        self._loaded_user_set = self._user_set
+        self._log.info("capture: loaded user set '%s'", self._user_set)
 
     def _configure_trigger(self) -> None:
         """Hardware trigger: FrameStart on the trigger line, rising edge."""
@@ -237,37 +319,65 @@ class CameraCapture:
                     pass
 
     # -- teardown -----------------------------------------------------------
-    def stop(self) -> None:
+    def stop(self, join_timeout: Optional[float] = None) -> None:
+        """Stop capturing and release the camera.
+
+        join_timeout bounds the wait for the capture thread (default: one grab timeout plus
+        2 s). The console-close handler passes a short one: Windows kills the process ~5 s
+        after the window is closed.
+        """
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=self._grab_timeout_ms / 1000.0 + 2.0)
+            if join_timeout is None:
+                join_timeout = self._grab_timeout_ms / 1000.0 + 2.0
+            self._thread.join(timeout=join_timeout)
+            if self._thread.is_alive():
+                self._log.warning("capture: capture thread still busy; releasing the "
+                                  "camera anyway")
         self._teardown()
         self._log.info("capture: stopped, %d images saved", self._count)
 
-    def _teardown(self) -> None:
-        """Release the camera and the Spinnaker system. Safe on a half-started capture."""
-        PySpin = self._spin
-        try:
-            if self._cam is not None:
-                for step in (
-                    lambda: self._cam.EndAcquisition(),
-                    lambda: self._cam.TriggerMode.SetValue(PySpin.TriggerMode_Off),
-                    lambda: self._cam.DeInit(),
-                ):
-                    try:
-                        step()
-                    except Exception:
-                        pass
-        finally:
-            self._cam = None
+    def _release_camera(self, quiet: bool = False) -> None:
+        """DeInit and drop the camera handle and list. quiet: failures are expected."""
+        log = self._log.debug if quiet else self._log.warning
+        if self._cam is not None:
             try:
-                if self._cam_list is not None:
-                    self._cam_list.Clear()
-                if self._system is not None:
-                    self._system.ReleaseInstance()
-            except Exception:
-                pass
-            self._cam_list = self._system = None
+                self._cam.DeInit()
+            except Exception as exc:
+                log("capture: teardown: DeInit failed: %s", exc)
+            self._cam = None
+        if self._cam_list is not None:
+            try:
+                self._cam_list.Clear()
+            except Exception as exc:
+                log("capture: teardown: clearing the camera list failed: %s", exc)
+            self._cam_list = None
+
+    def _teardown(self) -> None:
+        """Release the camera and the Spinnaker system. Safe on a half-started capture.
+
+        Failures are logged, not raised: a camera left acquiring is what makes the next
+        start fail ("Is another program using the camera?"), so the log should say so.
+        """
+        PySpin = self._spin
+        if self._cam is not None:
+            steps = [("trigger off", lambda: self._cam.TriggerMode.SetValue(
+                PySpin.TriggerMode_Off))]
+            if self._acquiring:
+                steps.insert(0, ("EndAcquisition", self._cam.EndAcquisition))
+            for name, step in steps:
+                try:
+                    step()
+                except Exception as exc:
+                    self._log.warning("capture: teardown: %s failed: %s", name, exc)
+            self._acquiring = False
+        self._release_camera()
+        if self._system is not None:
+            try:
+                self._system.ReleaseInstance()
+            except Exception as exc:
+                self._log.warning("capture: teardown: releasing Spinnaker failed: %s", exc)
+            self._system = None
 
 
 def start_capture(out_dir, logger: logging.Logger, user_set: str = "",

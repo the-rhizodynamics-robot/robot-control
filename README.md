@@ -237,6 +237,14 @@ It logs `REFUSING TO START: <reason>`, removes the empty run folder and exits. I
 falls back to SpinView on its own. To capture with SpinView deliberately, set
 `use_internal_capture = false`.
 
+**A camera left acquiring is reset automatically.** If a previous run ended without
+releasing the camera (window closed, crash, PC rebooted with the USB port powered), the
+camera refuses the User Set load until it is power-cycled. The host first stops the leftover
+acquisition, and if the camera still refuses it reboots the camera in software
+(`DeviceReset`, the equivalent of unplugging it) and tries once more. The log shows
+`camera refused setup (...); resetting it and retrying`. Only if that also fails does it
+refuse to start and ask you to unplug the camera.
+
 **Imaging settings live in the camera, not in git.** Exposure, gain, gamma, white balance
 and crop are stored in a camera User Set (`UserSet1`), which survives power cycles. To change them:
 
@@ -289,10 +297,12 @@ A periodic heartbeat ("Robot alive: N cycles…") is logged every few cycles.
   carriage is **parked at home and still** (the idle wait — at 15-minute cycles that's
   ~85–90 % of the time). After a reset the firmware de-energizes, kills the lights and
   blocks waiting for a handshake, so it cannot restart on its own.
-- ⚠️ **Do not** close the terminal window with the X or hard-kill the process. That
-  skips the killcode. The robot does not need the host to continue, so it keeps cycling
-  until the dead-man watchdog parks it ~two intervals later — and on firmware older than
-  that watchdog, indefinitely. Note also that the firmware only checks for the killcode at safe points
+- ⚠️ **Prefer Ctrl-C to closing the terminal window with the X.** The host catches the
+  window closing (and, best effort, logoff/shutdown) and sends the killcode and releases the
+  camera, but Windows only gives it ~5 s. A hard kill (Task Manager, power loss) skips
+  both: the robot keeps cycling until the dead-man watchdog parks it ~two intervals later —
+  on firmware older than that watchdog, indefinitely — and the next start has to reset the
+  camera. Note also that the firmware only checks for the killcode at safe points
   (between boxes, between shelves, during the inter-cycle wait), so a kill lands at the
   next checkpoint, not mid-move.
 

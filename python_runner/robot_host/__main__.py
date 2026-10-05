@@ -1,16 +1,17 @@
 """Entry point: python -m robot_host
 
 Flow: load defaults -> prompt for config -> confirm capture software ->
-open serial + handshake -> supervise cycles. Any exit path (kill, Ctrl-C,
-fatal error) sends the killcode so the robot never keeps running unattended
-after the host stops.
+open serial + handshake -> supervise cycles. Any exit path (kill, Ctrl-C, closing
+the console window, fatal error) sends the killcode and releases the camera, so the
+robot never keeps running unattended after the host stops.
 """
 from __future__ import annotations
 
 import logging
 import sys
+import threading
 
-from .capture import CaptureUnavailable, start_capture
+from .capture import CameraCapture, CaptureUnavailable, start_capture
 from .config import load_defaults, make_run_dir, prompt_config, write_run_config
 from .link import RobotLink
 from .monitor import Monitor, RobotStopped
@@ -28,6 +29,72 @@ def setup_logging() -> logging.Logger:
     fh.setFormatter(fmt)
     logger.addHandler(fh)
     return logger
+
+
+class RunEnd:
+    """End-of-run cleanup: release the camera, close serial. Runs once, from any thread.
+
+    Shared by main()'s finally and the console-close handler, which runs on its own
+    thread and may race it.
+    """
+
+    def __init__(self, logger: logging.Logger, capture: CameraCapture | None):
+        self.log = logger
+        self.capture = capture
+        self.link: RobotLink | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+        self._handler = None   # the console handler's ctypes callback, kept alive here
+
+    def close(self, send_kill: bool = False, join_timeout: float | None = None) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if send_kill and self.link:
+                try:
+                    self.link.send_kill()
+                except Exception as exc:  # noqa: BLE001 - still release the camera
+                    self.log.error("Could not send kill: %s", exc)
+            if self.capture:
+                self.capture.stop(join_timeout)
+            if self.link:
+                self.link.close()
+                self.log.info("Serial closed.")
+
+
+# Windows console control events that end the process without a KeyboardInterrupt.
+_CONSOLE_CLOSE_EVENTS = {2: "console window closed", 5: "user logoff",
+                         6: "system shutdown"}
+
+
+def install_console_close_handler(end: RunEnd) -> None:
+    """Send the kill and release the camera when the console window is closed.
+
+    For these events Windows doesn't raise KeyboardInterrupt, it terminates the process,
+    so main()'s finally never runs: no killcode, and the camera is left acquiring. The
+    handler has ~5 s before the process is killed, so it sends the kill first and gives
+    the capture thread a short join. Logoff/shutdown are best effort (Windows doesn't
+    deliver them to every console process); capture.start()'s camera reset covers
+    whatever this misses. Ctrl-C/Ctrl-Break are left to Python.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    def handler(event):
+        reason = _CONSOLE_CLOSE_EVENTS.get(event)
+        if reason is None:
+            return False   # not ours: pass it on to Python's handler
+        end.log.warning("%s - sending kill and releasing the camera", reason)
+        end.close(send_kill=True, join_timeout=1.0)
+        return True
+
+    end._handler = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(handler)
+    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(end._handler, True):
+        end.log.warning("Could not install the console-close handler; closing the window "
+                        "will skip the kill and leave the camera armed")
 
 
 def main() -> None:
@@ -65,50 +132,53 @@ def main() -> None:
                 pass
             sys.exit(1)
 
-    # Record the run (geometry, settings, host commit, camera settings) in the run folder
-    # before the robot starts.
+    # From here on the camera is armed, so every way out must release it: a camera left
+    # acquiring refuses the next run's User Set load until it is power-cycled.
+    end = RunEnd(logger, capture)
+    install_console_close_handler(end)
     try:
-        manifest = write_run_config(run_dir, cfg, capture.settings if capture else None)
-        logger.info("Run config written: %s", manifest)
-    except OSError as exc:
-        logger.warning("Could not write run_config.json (%s) - continuing", exc)
+        # Record the run (geometry, settings, host commit, camera settings) in the run
+        # folder before the robot starts.
+        try:
+            manifest = write_run_config(run_dir, cfg, capture.settings if capture else None)
+            logger.info("Run config written: %s", manifest)
+        except OSError as exc:
+            logger.warning("Could not write run_config.json (%s) - continuing", exc)
 
-    if capture:
-        input("\nIn-process camera capture is running (frames saved on each "
-              "trigger). Press Enter to start the robot... ")
-    else:
-        input(f"\nPoint FlyCap/Spinnaker to save into {cfg.image_dir} and confirm it is "
-              "running, then press Enter to start... ")
-
-    link: RobotLink | None = None
-    try:
-        logger.info("Opening %s ...", cfg.com_port)
-        link = RobotLink(cfg.com_port)
-
-        logger.info("Handshaking...")
-        if not link.handshake(cfg.handshake_values(), on_status=logger.info):
-            logger.warning("Handshake echoes did not all match - "
-                           "check the firmware/wiring before trusting the run")
-
-        notifier = Notifier(logger)
-        Monitor(link, cfg, notifier, logger).run()
-
-    except RobotStopped as exc:
-        logger.error("Run ended: %s", exc)
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by operator - sending kill")
-        if link:
-            link.send_kill()
-    except Exception as exc:  # noqa: BLE001 - last-resort safety net
-        logger.exception("Fatal error - sending kill: %s", exc)
-        if link:
-            link.send_kill()
-    finally:
         if capture:
-            capture.stop()
-        if link:
-            link.close()
-        logger.info("Serial closed.")
+            input("\nIn-process camera capture is running (frames saved on each "
+                  "trigger). Press Enter to start the robot... ")
+        else:
+            input(f"\nPoint FlyCap/Spinnaker to save into {cfg.image_dir} and confirm it "
+                  "is running, then press Enter to start... ")
+
+        link: RobotLink | None = None
+        try:
+            logger.info("Opening %s ...", cfg.com_port)
+            link = end.link = RobotLink(cfg.com_port)
+
+            logger.info("Handshaking...")
+            if not link.handshake(cfg.handshake_values(), on_status=logger.info):
+                logger.warning("Handshake echoes did not all match - "
+                               "check the firmware/wiring before trusting the run")
+
+            notifier = Notifier(logger)
+            Monitor(link, cfg, notifier, logger).run()
+
+        except RobotStopped as exc:
+            logger.error("Run ended: %s", exc)
+        except KeyboardInterrupt:
+            logger.warning("Interrupted by operator - sending kill")
+            if link:
+                link.send_kill()
+        except Exception as exc:  # noqa: BLE001 - last-resort safety net
+            logger.exception("Fatal error - sending kill: %s", exc)
+            if link:
+                link.send_kill()
+    except KeyboardInterrupt:
+        logger.warning("Interrupted before the robot started")
+    finally:
+        end.close()
 
 
 if __name__ == "__main__":
