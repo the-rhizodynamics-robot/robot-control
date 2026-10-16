@@ -70,6 +70,12 @@ class CameraCapture:
         self._processor = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Frames only count once the run has started (accept_frames(), after the handshake).
+        # Opening the COM port resets the Arduino, and the trigger line can flick during that
+        # reset: the A&M rig saved one stray frame ~1 min before its first sweep (run
+        # 20260914105613), which shifts every later frame's box position by one.
+        self._accepting = threading.Event()
+        self._discarded = 0
         self._count = 0
         self._acquiring = False
         self._loaded_user_set: Optional[str] = None
@@ -288,6 +294,13 @@ class CameraCapture:
             pass
         return out
 
+    def accept_frames(self) -> None:
+        """Start saving frames: call once the handshake has started the robot."""
+        if self._discarded:
+            self._log.warning("capture: discarded %d frame(s) triggered before the run started",
+                              self._discarded)
+        self._accepting.set()
+
     # -- capture loop -------------------------------------------------------
     def _run(self) -> None:
         PySpin = self._spin
@@ -305,8 +318,14 @@ class CameraCapture:
                     self._log.warning("capture: incomplete frame (status %s)",
                                       img.GetImageStatus())
                     continue
+                if not self._accepting.is_set():
+                    self._discarded += 1   # a trigger before the run started: never a real photo
+                    continue
                 converted = self._processor.Convert(img, PySpin.PixelFormat_BGR8)
-                path = self._out_dir / f"{self._name_prefix}-{self._count:06d}.jpg"
+                # Capture time in the name, so it survives any copy (file dates often don't);
+                # the frame number stays the last '-' field, which file-sorting parses.
+                stamp = time.strftime("%Y%m%dT%H%M%S")
+                path = self._out_dir / f"{self._name_prefix}-{stamp}-{self._count:06d}.jpg"
                 converted.Save(str(path), self._jpeg)
                 self._count += 1
                 if self._count <= 5 or self._count % 20 == 0:

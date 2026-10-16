@@ -226,7 +226,7 @@ to save into this new folder each run** (it's printed at the "Point FlyCap/Spinn
 
 **In-process (default).** The host opens the camera with PySpin, loads the User Set named
 by `camera_user_set`, arms it on the Arduino's hardware trigger (Line0, rising edge), and
-saves each frame as `robotcap-NNNNNN.jpg` (JPEG quality 100, like SpinView's recorder).
+saves each frame as `robotcap-<YYYYMMDDTHHMMSS>-NNNNNN.jpg (capture time in the name, so it survives copying; frames triggered before the handshake finishes are discarded)` (JPEG quality 100, like SpinView's recorder).
 Capture starts and stops with the run. This replaces SpinView for capture: SpinView's
 recorder leaks ~34 MB per frame and ended every long run at ~3,400 images when Windows ran
 out of memory. The in-process path was bench-tested flat over 300 frames.

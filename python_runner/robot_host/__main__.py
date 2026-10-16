@@ -161,6 +161,8 @@ def main() -> None:
             if not link.handshake(cfg.handshake_values(), on_status=logger.info):
                 logger.warning("Handshake echoes did not all match - "
                                "check the firmware/wiring before trusting the run")
+            if capture:
+                capture.accept_frames()   # anything triggered during the reset/handshake is dropped
 
             notifier = Notifier(logger)
             Monitor(link, cfg, notifier, logger).run()
