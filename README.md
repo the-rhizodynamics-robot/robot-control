@@ -29,6 +29,13 @@ and repeats on a fixed schedule. The system has two halves:
 - **Lighting:** one relay per shelf (active-LOW) for grow lights.
 - **Link:** USB serial between the Arduino and the host PC.
 
+**Rig settings.** Everything that depends on how a particular robot is built is marked
+`RIG SETTING` near the top of `robot_device_serial.ino`: the Y pin order, direction polarity,
+move durations (calibrate per rig), `HOLD_BETWEEN_CYCLES`, and lighting. `SINGLE_LIGHT_RELAY =
+true` switches every LED from one relay (D11) for the whole sweep, instead of one relay per
+shelf. `main` carries generic values. The `zhu-lab` branch is the College Station rig: Y pins
+8/9/10, right = HIGH, 5166/19282/1722 ms moves, single relay, motors held between cycles.
+
 ### Pin map (Mega 2560)
 
 | Function | Pin(s) | Notes |
@@ -169,7 +176,7 @@ early in each interval, right after the photos for that cycle are taken.
 
 ```bat
 cd python_runner
-C:\Users\zhu.lab\pyspin-env\Scripts\python.exe -m robot_host
+C:\path\to\pyspin-env\Scripts\python.exe -m robot_host
 ```
 
 (`pyspin-env` is the Python 3.10 venv with PySpin, pyserial and tomli. Plain `python`

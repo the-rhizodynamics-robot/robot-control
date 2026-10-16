@@ -16,12 +16,12 @@ from pathlib import Path
 # the interactive prompts override that.
 DEFAULTS = {
     "com_port": "COM4",
-    "num_shelves": 4,
+    "num_shelves": 3,
     "photos_per_shelf": 8,
     "cycle_interval_min": 15,
     "day_hours": 24,          # 24 = constant light
     "start_hour": 0,
-    "image_dir": r"C:\Users\zhu.lab\Desktop\robotic_imaging",
+    "image_dir": r"C:\Users\you\Desktop\robotic_imaging",
     "kill_margin_min": 2,     # grace added to the cycle interval before a kill
     "use_internal_capture": True,  # capture via PySpin in-process; the host refuses to start if it can't
     "camera_user_set": "",    # camera User Set to load at start (e.g. "UserSet1"); "" = leave as-is

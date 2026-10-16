@@ -69,24 +69,34 @@ const int stepPinX = 5;      // horizontal motor
 const int dirPinX  = 7;
 const int enblPinX = 6;
 
-const int stepPinY = 8;      // vertical (both Y drivers ganged; bench-tested wiring)
-const int dirPinY  = 9;
-const int enblPinY = 10;
+// RIG SETTING: Y dir/enable pins. Generic map 8/10/9; the College Station rig (zhu-lab
+// branch) is wired 8/9/10.
+const int stepPinY = 8;      // vertical motor(s); two Y drivers are ganged on these pins
+const int dirPinY  = 10;
+const int enblPinY = 9;
 
 const int cameraPin = 12;    // -> 1k -> BFS GPIO Line 0 (OPTO_IN, black); GND -> blue (OPTO_GND)
 
-// Single LED relay -- all lights on one channel (D11), active-LOW. Bench wiring
-// for THIS robot (not the per-shelf relay bank of the previous build).
-const bool ENABLE_LIGHTS = true;
-const int  ledRelayPin   = 11;
-const int  MAX_SHELVES   = 8;   // sanity clamp on host-sent numShelves
+// RIG SETTING: lights (relays active-LOW).
+//   SINGLE_LIGHT_RELAY = false (generic): one relay per shelf (shelfRelayPins), lit for each
+//     photo and, at night, switched off after it.
+//   SINGLE_LIGHT_RELAY = true (College Station): every LED on one relay (ledRelayPin), on for
+//     the whole sweep, with a longer warm-up on the first cycle.
+const bool ENABLE_LIGHTS      = true;
+const bool SINGLE_LIGHT_RELAY = false;
+const int  ledRelayPin        = 11;
+const int  shelfRelayPins[]   = {23, 25, 27, 29, 31, 33};
+const int  N_SHELF_RELAYS     = 6;   // size of shelfRelayPins
+const int  MAX_SHELVES        = SINGLE_LIGHT_RELAY ? 8 : N_SHELF_RELAYS; // sanity clamp on host-sent numShelves
 const int  RELAY_ON  = LOW;
 const int  RELAY_OFF = HIGH;
 
 // ---------------- Direction constants ------------------------
-const boolean right = HIGH;   // bench-tested on this robot
-const boolean left  = LOW;
-const boolean up    = LOW;    // bench-tested
+// RIG SETTING: direction polarity (depends on motor wiring). Generic: right = LOW;
+// College Station: right = HIGH, left = LOW.
+const boolean right = LOW;
+const boolean left  = HIGH;
+const boolean up    = LOW;
 const boolean down  = HIGH;
 
 // ---------------- Timing (same as robot_device.ino) ----------
@@ -98,13 +108,13 @@ const unsigned long CAMERA_PULSE_MS  = 50;    // HIGH pulse width; confirmed fir
 const unsigned long LIGHT_SETTLE_MS  = 3000;
 const unsigned long LIGHT_WARMUP_MS  = 10000; // first cycle only: let the LEDs warm up before imaging
 const unsigned long POST_SHOT_MS     = 500;
-// Calibrated 2026-07-04 (axis_calibration: 29.5 cm / 20 s = 1.475 cm/s, both axes):
-//   box pitch 3" = 7.62 cm -> 5166 ms; shelf pitch 31.6 cm -> 21424 ms, taken
-//   -10% to 19282 by operator on the bench run; first box ~1" right of home.
-const unsigned long MOVE_PER_BOX_MS   = 5166;  // box pitch (3")
-const unsigned long MOVE_PER_SHELF_MS = 19282; // shelf pitch (31.6 cm, cal -10%)
-const unsigned long START_OFFSET_X_MS = 1722;  // jog right to box 1 (~1")
-const unsigned long START_OFFSET_Y_MS = 0;     // shelf 1 at home height
+// RIG SETTING: move durations -- calibrate per rig (time = distance / speed). For reference,
+// the College Station rig (zhu-lab branch) measured 1.475 cm/s on both axes: box pitch 3" ->
+// 5166 ms, shelf pitch 31.6 cm -> 19282 ms (-10% on the bench), first box 1722 ms right of home.
+const unsigned long MOVE_PER_BOX_MS   = 1400; // [TUNE] land on each box
+const unsigned long MOVE_PER_SHELF_MS = 8000; // [TUNE]
+const unsigned long START_OFFSET_X_MS = 0;    // [CONFIRM]
+const unsigned long START_OFFSET_Y_MS = 0;    // [CONFIRM]
 const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before stepping
 
 // ---------------- Idle holding current -----------------------
@@ -124,7 +134,9 @@ const unsigned long MOTOR_SETTLE_MS   = 200;  // let drivers energize before ste
 // Idle drift is already discarded because loop() re-homes at the start of every
 // cycle regardless. Set false to restore the previous release-when-idle
 // behaviour. Does not apply before the handshake -- see setup().
-const boolean HOLD_BETWEEN_CYCLES = true;
+// RIG SETTING: generic false (motors cold between cycles; needs the Y axis to rest on its stops
+// or a mechanical hold). College Station runs true.
+const boolean HOLD_BETWEEN_CYCLES = false;
 
 // Vertical home seating + LEVELING. homeToSensors() stops on the single vertical
 // sensor, which can leave the gantry slightly tilted (right side high). We then
@@ -276,9 +288,16 @@ void setup() {
   pinMode(cameraPin, OUTPUT);
   digitalWrite(cameraPin, LOW);
 
-  if (ENABLE_LIGHTS) {
-    pinMode(ledRelayPin, OUTPUT);
-    digitalWrite(ledRelayPin, RELAY_OFF);   // lights off until a cycle runs
+  if (ENABLE_LIGHTS) {   // lights off until a cycle runs
+    if (SINGLE_LIGHT_RELAY) {
+      pinMode(ledRelayPin, OUTPUT);
+      digitalWrite(ledRelayPin, RELAY_OFF);
+    } else {
+      for (int i = 0; i < N_SHELF_RELAYS; i++) {
+        pinMode(shelfRelayPins[i], OUTPUT);
+        digitalWrite(shelfRelayPins[i], RELAY_OFF);
+      }
+    }
   }
 
   // ---- Banner ----
@@ -323,10 +342,10 @@ void loop() {
 
   bool dayTime = (dayElapsedHours < dayHours);
 
-  // All LEDs are on ONE relay -- switch on once for the whole sweep. The first
-  // cycle waits ~10 s so the LEDs fully warm up/stabilize before any imaging;
-  // later cycles just use the short settle.
-  if (ENABLE_LIGHTS) {
+  // Single relay: all LEDs on ONE relay -- switch on once for the whole sweep. The first
+  // cycle waits ~10 s so the LEDs fully warm up/stabilize before any imaging; later
+  // cycles just use the short settle. (Per-shelf relays are lit in takePhoto().)
+  if (ENABLE_LIGHTS && SINGLE_LIGHT_RELAY) {
     digitalWrite(ledRelayPin, RELAY_ON);
     delay(firstCycle ? LIGHT_WARMUP_MS : LIGHT_SETTLE_MS);
     firstCycle = false;
@@ -337,7 +356,7 @@ void loop() {
   for (int shelf = 1; shelf <= numShelves; shelf++) {
     checkKillSignal();
     Serial.print("Photographing shelf "); Serial.println(shelf);
-    photographShelf(dir);
+    photographShelf(shelf, dir, dayTime);
 
     if (shelf < numShelves) {
       Serial.println("Moving up to next shelf...");
@@ -350,7 +369,7 @@ void loop() {
   returnHome();
 
   // At night, cut the lights between cycles; in daylight leave them on.
-  if (ENABLE_LIGHTS && !dayTime) digitalWrite(ledRelayPin, RELAY_OFF);
+  if (ENABLE_LIGHTS && SINGLE_LIGHT_RELAY && !dayTime) digitalWrite(ledRelayPin, RELAY_OFF);
 
   // Idle wait: either hold position under current, or release. returnHome() has
   // just seated the carriage on its bottom stop, so releasing here is drop-free
@@ -393,26 +412,34 @@ void loop() {
 }
 
 // Take photosPerShelf pictures across one shelf in snake direction `dir`.
-void photographShelf(boolean dir) {
+void photographShelf(int shelf, boolean dir, bool dayTime) {
   digitalWrite(dirPinX, dir);
   for (int box = 0; box < photosPerShelf; box++) {
     checkKillSignal();
     // Let the gantry settle before the shutter. Skipped for box 0, which has just
     // had LIGHT_SETTLE_MS/LIGHT_WARMUP_MS while the lights came up.
     if (box > 0 && PRE_SHOT_SETTLE_MS) delay(PRE_SHOT_SETTLE_MS);
-    takePhoto();
+    takePhoto(shelf, dayTime);
     if (box < photosPerShelf - 1) {
       moveHorizontal(dir, MOVE_PER_BOX_MS);
     }
   }
 }
 
-// Lights are already on (single relay, whole run). Just pulse the camera.
-void takePhoto() {
+// Pulse the camera. Single relay: the lights are already on for the whole sweep.
+// Per-shelf relays: light this shelf first and, at night, switch it off after.
+void takePhoto(int shelf, bool dayTime) {
+  bool perShelf = ENABLE_LIGHTS && !SINGLE_LIGHT_RELAY;
+  int relay = shelfRelayPins[constrain(shelf, 1, N_SHELF_RELAYS) - 1];
+  if (perShelf) {
+    digitalWrite(relay, RELAY_ON);
+    delay(LIGHT_SETTLE_MS);
+  }
   digitalWrite(cameraPin, HIGH);
   delay(CAMERA_PULSE_MS);
   digitalWrite(cameraPin, LOW);
   delay(POST_SHOT_MS);
+  if (perShelf && !dayTime) digitalWrite(relay, RELAY_OFF);
 }
 
 void moveHorizontal(boolean direction, unsigned long durationMs) {
@@ -546,10 +573,11 @@ void homeToSensors() {
   digitalWrite(dirPinY, up);
 }
 
-// All lights off. Shared by the kill and fault paths. This robot drives every
-// shelf from ONE relay, not the per-shelf bank the generic firmware assumes.
+// All lights off. Shared by the kill and fault paths.
 void lightsOff() {
-  if (ENABLE_LIGHTS) digitalWrite(ledRelayPin, RELAY_OFF);
+  if (!ENABLE_LIGHTS) return;
+  if (SINGLE_LIGHT_RELAY) digitalWrite(ledRelayPin, RELAY_OFF);
+  else for (int i = 0; i < N_SHELF_RELAYS; i++) digitalWrite(shelfRelayPins[i], RELAY_OFF);
 }
 
 // Drive the carriage DOWN until the vertical flag triggers or `budgetMs` runs
