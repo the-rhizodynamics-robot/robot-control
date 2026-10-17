@@ -255,6 +255,12 @@ and crop are stored in a camera User Set (`UserSet1`), which survives power cycl
    Save**. Keep **User Set Default = UserSet1** so the camera also powers up with them.
 4. Ctrl-C the run, close SpinView, set `use_internal_capture = true`, and start the real run.
 
+**`run_status.json`.** Updated when the robot starts, after every cycle, and when the host
+stops: `state` (`running`/`stopped`), `updated` (also as epoch seconds) and `frames_saved`.
+file-sorting's `image-sort` uses it to hold back a run that is still being imaged, or only partly
+copied. A run whose host died (reboot, crash) stays `running` with a stale time, which counts as
+over.
+
 **`run_config.json`.** Every run folder gets a visible `run_config.json`, written before the
 robot starts. It holds the run geometry and settings, the host code's git commit and, with
 in-process capture, the camera settings actually in use (model, serial, firmware, crop,

@@ -12,9 +12,9 @@ import sys
 import threading
 
 from .capture import CameraCapture, CaptureUnavailable, start_capture
-from .config import load_defaults, make_run_dir, prompt_config, write_run_config
+from .config import load_defaults, make_run_dir, prompt_config, write_run_config, write_run_status
 from .link import RobotLink
-from .monitor import Monitor, RobotStopped
+from .monitor import Monitor, RobotStopped, count_images
 from .notifier import Notifier
 
 
@@ -45,6 +45,7 @@ class RunEnd:
         self._lock = threading.Lock()
         self._closed = False
         self._handler = None   # the console handler's ctypes callback, kept alive here
+        self.status = None     # set once the robot starts: callable(state, frames, reason)
 
     def close(self, send_kill: bool = False, join_timeout: float | None = None) -> None:
         with self._lock:
@@ -58,6 +59,8 @@ class RunEnd:
                     self.log.error("Could not send kill: %s", exc)
             if self.capture:
                 self.capture.stop(join_timeout)
+            if self.status:
+                self.status("stopped", None, "host stopped" + (" (window closed / shutdown)" if send_kill else ""))
             if self.link:
                 self.link.close()
                 self.log.info("Serial closed.")
@@ -164,8 +167,19 @@ def main() -> None:
             if capture:
                 capture.accept_frames()   # anything triggered during the reset/handshake is dropped
 
+            def status(state, frames=None, reason=None):
+                """run_status.json; a failed write must never stop imaging."""
+                try:
+                    write_run_status(run_dir, state, count_images(str(run_dir)) if frames is None else frames,
+                                     cfg.cycle_interval_min, reason)
+                except OSError as exc:
+                    logger.warning("Could not write run_status.json (%s)", exc)
+            status("running", 0)
+            end.status = status
+
             notifier = Notifier(logger)
-            Monitor(link, cfg, notifier, logger).run()
+            Monitor(link, cfg, notifier, logger,
+                    on_cycle=lambda n: status("running", n)).run()
 
         except RobotStopped as exc:
             logger.error("Run ended: %s", exc)
