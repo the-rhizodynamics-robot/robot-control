@@ -39,8 +39,9 @@ def count_images(image_dir: str) -> int:
 class Monitor:
     def __init__(self, link: RobotLink, config: Config, notifier,
                  logger: logging.Logger | None = None,
-                 heartbeat_every_cycles: int = 8):
+                 heartbeat_every_cycles: int = 8, on_cycle=None):
         self.link = link
+        self.on_cycle = on_cycle   # called with the image count after every cycle (run_status.json)
         self.cfg = config
         self.notifier = notifier
         self.log = logger or logging.getLogger("robot")
@@ -82,6 +83,8 @@ class Monitor:
             now_count = count_images(self.cfg.image_dir)
             delta = now_count - prev_count
             prev_count = now_count
+            if self.on_cycle:
+                self.on_cycle(now_count)
 
             if delta == expected:
                 zero_streak = 0

@@ -7,6 +7,7 @@ brackets; pressing Enter accepts the default. Numeric values are bounds-checked
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -132,6 +133,33 @@ def _host_code_version() -> dict:
                 "uncommitted_changes": None if status is None else bool(status)}
     except (OSError, subprocess.SubprocessError):
         return {}
+
+
+RUN_STATUS_NAME = "run_status.json"
+
+
+def write_run_status(run_dir: str | Path, state: str, frames_saved: int,
+                     cycle_interval_min: int, reason: str | None = None) -> Path:
+    """Write run_status.json: is this run still imaging, and how many frames has it saved?
+
+    Updated when the robot starts, after every completed cycle, and once more when the host
+    stops ("stopped"). file-sorting's image-sort reads it to hold back a run that is still
+    being imaged ("running", updated within ~2 cycles) or only partly copied (fewer frames on
+    disk than frames_saved). A run whose host died -- a reboot, a crash -- stays "running" with
+    a stale timestamp, which image-sort treats as over. Time is stored as epoch seconds too, so
+    a PC in another time zone reads it correctly. Written atomically (temp file + rename).
+    """
+    now = datetime.now()
+    data = {"state": state, "updated": now.isoformat(timespec="seconds"),
+            "updated_epoch": int(now.timestamp()), "frames_saved": int(frames_saved),
+            "cycle_interval_min": cycle_interval_min}
+    if reason:
+        data["reason"] = reason
+    path = Path(run_dir) / RUN_STATUS_NAME
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
 
 
 def write_run_config(run_dir: str | Path, cfg: Config, camera: dict | None) -> Path:
